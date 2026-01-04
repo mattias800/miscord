@@ -1,0 +1,66 @@
+[package]
+name = "miscord-client"
+description = "Desktop client for Miscord with voice, video, and screen sharing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miscord"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+miscord-protocol = { workspace = true }
+miscord-media = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# GUI
+eframe = { workspace = true }
+egui = { workspace = true }
+
+# WebSocket
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+# WebRTC
+webrtc = { workspace = true }
+
+# Media capture
+nokhwa = { workspace = true }
+
+# Audio
+cpal = { workspace = true }
+opus = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+config = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Futures
+futures = "0.3"
+
+# Screen capture (cross-platform)
+xcap = "0.0.14"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Media_MediaFoundation",
+] }
+
+[dev-dependencies]
+tokio-test = "0.4"

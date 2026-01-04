@@ -1,0 +1,57 @@
+[package]
+name = "miscord-server"
+description = "Self-hosted Miscord server with text, voice, and video support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miscord-server"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+miscord-protocol = { workspace = true }
+miscord-media = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Web framework
+axum = { workspace = true }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = "1.5"
+hyper-util = "0.1"
+
+# WebSocket
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+# WebRTC
+webrtc = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Authentication
+argon2 = { workspace = true }
+jsonwebtoken = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+config = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

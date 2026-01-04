@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/miscord-server",
+    "crates/miscord-client",
+    "crates/miscord-protocol",
+    "crates/miscord-media",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mattias800/miscord"
+authors = ["Miscord Contributors"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# WebSocket
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP/API
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# WebRTC
+webrtc = "0.12"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "migrate", "uuid", "chrono"] }
+
+# Authentication
+argon2 = "0.5"
+jsonwebtoken = "9.3"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+config = "0.14"
+rand = "0.8"
+
+# Media capture (client only)
+nokhwa = { version = "0.10", features = ["input-native"] }
+
+# GUI (client only)
+eframe = "0.30"
+egui = "0.30"
+
+# Audio
+cpal = "0.15"
+opus = "0.3"
+
+# Workspace members
+miscord-protocol = { path = "crates/miscord-protocol" }
+miscord-media = { path = "crates/miscord-media" }

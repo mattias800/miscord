@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: miscord-db
+    environment:
+      POSTGRES_USER: miscord
+      POSTGRES_PASSWORD: miscord
+      POSTGRES_DB: miscord
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miscord"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: miscord-server
+    environment:
+      DATABASE_URL: postgres://miscord:miscord@postgres:5432/miscord
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
+      BIND_ADDRESS: 0.0.0.0:8080
+      RUST_LOG: miscord_server=debug,tower_http=debug
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

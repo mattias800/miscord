@@ -1,0 +1,39 @@
+# Build stage
+FROM rust:1.83-bookworm AS builder
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Build release
+RUN cargo build --release -p miscord-server
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/miscord-server /app/miscord-server
+
+# Copy migrations
+COPY --from=builder /app/crates/miscord-server/migrations /app/migrations
+
+EXPOSE 8080
+
+CMD ["./miscord-server"]
