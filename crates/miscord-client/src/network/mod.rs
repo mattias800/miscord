@@ -3,7 +3,7 @@ mod websocket;
 
 use crate::state::{AppState, LoginRequest, LoginResponse, RegisterRequest, RegisterResponse};
 use anyhow::Result;
-use miscord_protocol::{ChannelData, ChannelType, MessageData, ServerData, UserData};
+use miscord_protocol::{ChannelData, ChannelType, CommunityData, MessageData, UserData};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -72,7 +72,7 @@ impl NetworkClient {
         *self.ws_client.write().await = Some(client);
 
         // Load initial data
-        self.load_servers().await?;
+        self.load_communities().await?;
 
         Ok(())
     }
@@ -83,46 +83,46 @@ impl NetworkClient {
         }
     }
 
-    // Servers
+    // Communities
 
-    pub async fn load_servers(&self) -> Result<()> {
+    pub async fn load_communities(&self) -> Result<()> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
-        let servers: Vec<ServerData> = api::get(&format!("{}/api/servers", server_url), token.as_deref()).await?;
-        self.state.set_servers(servers).await;
+        let communities: Vec<CommunityData> = api::get(&format!("{}/api/communities", server_url), token.as_deref()).await?;
+        self.state.set_communities(communities).await;
 
         Ok(())
     }
 
-    pub async fn get_servers(&self) -> Result<Vec<ServerData>> {
+    pub async fn get_communities(&self) -> Result<Vec<CommunityData>> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
-        api::get(&format!("{}/api/servers", server_url), token.as_deref()).await
+        api::get(&format!("{}/api/communities", server_url), token.as_deref()).await
     }
 
-    pub async fn create_server(&self, name: &str) -> Result<ServerData> {
+    pub async fn create_community(&self, name: &str) -> Result<CommunityData> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
         #[derive(serde::Serialize)]
-        struct CreateServer {
+        struct CreateCommunity {
             name: String,
         }
 
         api::post(
-            &format!("{}/api/servers", server_url),
-            &CreateServer { name: name.to_string() },
+            &format!("{}/api/communities", server_url),
+            &CreateCommunity { name: name.to_string() },
             token.as_deref(),
         )
         .await
     }
 
-    pub async fn join_server(&self, invite_code: &str) -> Result<ServerData> {
+    pub async fn join_community(&self, invite_code: &str) -> Result<CommunityData> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
-        api::post::<ServerData, _>(
+        api::post::<CommunityData, _>(
             &format!("{}/api/invites/{}", server_url, invite_code),
             &(),
             token.as_deref(),
@@ -132,11 +132,11 @@ impl NetworkClient {
 
     // Channels
 
-    pub async fn get_channels(&self, server_id: Uuid) -> Result<Vec<ChannelData>> {
+    pub async fn get_channels(&self, community_id: Uuid) -> Result<Vec<ChannelData>> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
         api::get(
-            &format!("{}/api/servers/{}/channels", server_url, server_id),
+            &format!("{}/api/communities/{}/channels", server_url, community_id),
             token.as_deref(),
         )
         .await
@@ -144,7 +144,7 @@ impl NetworkClient {
 
     pub async fn create_channel(
         &self,
-        server_id: Uuid,
+        community_id: Uuid,
         name: &str,
         channel_type: ChannelType,
     ) -> Result<ChannelData> {
@@ -158,11 +158,23 @@ impl NetworkClient {
         }
 
         api::post(
-            &format!("{}/api/servers/{}/channels", server_url, server_id),
+            &format!("{}/api/communities/{}/channels", server_url, community_id),
             &CreateChannel {
                 name: name.to_string(),
                 channel_type,
             },
+            token.as_deref(),
+        )
+        .await
+    }
+
+    // Members
+
+    pub async fn get_members(&self, community_id: Uuid) -> Result<Vec<UserData>> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+        api::get(
+            &format!("{}/api/communities/{}/members", server_url, community_id),
             token.as_deref(),
         )
         .await

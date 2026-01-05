@@ -26,42 +26,42 @@ impl ChannelList {
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
-        let (current_server, channels, current_channel) = runtime.block_on(async {
+        let (current_community, channels, current_channel) = runtime.block_on(async {
             let s = state.read().await;
-            let current_server = s.current_server_id;
+            let current_community = s.current_community_id;
             let channels: Vec<_> = s
                 .channels
                 .values()
-                .filter(|c| c.server_id == current_server)
+                .filter(|c| c.community_id == current_community)
                 .cloned()
                 .collect();
             let current_channel = s.current_channel_id;
-            (current_server, channels, current_channel)
+            (current_community, channels, current_channel)
         });
 
-        if current_server.is_none() {
+        if current_community.is_none() {
             ui.centered_and_justified(|ui| {
-                ui.label("Select a server");
+                ui.label("Select a community");
             });
             return;
         }
 
-        let server_id = current_server.unwrap();
+        let community_id = current_community.unwrap();
 
         ui.vertical(|ui| {
-            // Server name header
-            let server_name = runtime.block_on(async {
+            // Community name header
+            let community_name = runtime.block_on(async {
                 state
                     .read()
                     .await
-                    .servers
-                    .get(&server_id)
-                    .map(|s| s.name.clone())
+                    .communities
+                    .get(&community_id)
+                    .map(|c| c.name.clone())
                     .unwrap_or_default()
             });
 
             ui.horizontal(|ui| {
-                ui.heading(&server_name);
+                ui.heading(&community_name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("+").on_hover_text("Create Channel").clicked() {
                         self.show_create_dialog = true;
@@ -181,7 +181,7 @@ impl ChannelList {
 
                             runtime.spawn(async move {
                                 if let Ok(channel) =
-                                    network.create_channel(server_id, &name, channel_type).await
+                                    network.create_channel(community_id, &name, channel_type).await
                                 {
                                     let mut s = state.write().await;
                                     s.channels.insert(channel.id, channel);

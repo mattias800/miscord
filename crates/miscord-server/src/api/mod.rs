@@ -1,7 +1,7 @@
 mod auth;
 mod channels;
+mod communities;
 mod messages;
-mod servers;
 mod users;
 
 use crate::state::AppState;
@@ -29,20 +29,21 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/users/me", get(users::get_me).patch(users::update_me))
         .route("/api/users/{id}", get(users::get_user))
         .route("/api/users/me/friends", get(users::get_friends))
-        // Server routes
-        .route("/api/servers", post(servers::create_server).get(servers::list_servers))
+        // Community routes
+        .route("/api/communities", post(communities::create_community).get(communities::list_communities))
         .route(
-            "/api/servers/{id}",
-            get(servers::get_server)
-                .patch(servers::update_server)
-                .delete(servers::delete_server),
+            "/api/communities/{id}",
+            get(communities::get_community)
+                .patch(communities::update_community)
+                .delete(communities::delete_community),
         )
         .route(
-            "/api/servers/{id}/channels",
-            get(servers::list_channels).post(servers::create_channel),
+            "/api/communities/{id}/channels",
+            get(communities::list_channels).post(communities::create_channel),
         )
-        .route("/api/servers/{id}/invites", post(servers::create_invite))
-        .route("/api/invites/{code}", post(servers::join_server))
+        .route("/api/communities/{id}/members", get(communities::list_members))
+        .route("/api/communities/{id}/invites", post(communities::create_invite))
+        .route("/api/invites/{code}", post(communities::join_community))
         // Channel routes
         .route(
             "/api/channels/{id}",

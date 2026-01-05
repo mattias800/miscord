@@ -131,38 +131,38 @@ async fn create_test_user(
     Ok((token, user_id))
 }
 
-/// Create a server and return its ID
-async fn create_server(
+/// Create a community and return its ID
+async fn create_community(
     client: &Client,
     http_url: &str,
     token: &str,
     name: &str,
 ) -> anyhow::Result<uuid::Uuid> {
     let response = client
-        .post(format!("{}/api/servers", http_url))
+        .post(format!("{}/api/communities", http_url))
         .header("Authorization", format!("Bearer {}", token))
         .json(&json!({ "name": name }))
         .send()
         .await?;
 
     let data: serde_json::Value = response.json().await?;
-    let server_id = data["id"]
+    let community_id = data["id"]
         .as_str()
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
-        .ok_or_else(|| anyhow::anyhow!("No server id in response"))?;
+        .ok_or_else(|| anyhow::anyhow!("No community id in response"))?;
 
-    Ok(server_id)
+    Ok(community_id)
 }
 
-/// Get channels for a server
+/// Get channels for a community
 async fn get_channels(
     client: &Client,
     http_url: &str,
     token: &str,
-    server_id: uuid::Uuid,
+    community_id: uuid::Uuid,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let response = client
-        .get(format!("{}/api/servers/{}/channels", http_url, server_id))
+        .get(format!("{}/api/communities/{}/channels", http_url, community_id))
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await?;
@@ -261,7 +261,7 @@ async fn test_user_registration_and_login() {
 }
 
 #[tokio::test]
-async fn test_create_server_and_channels() {
+async fn test_create_community_and_channels() {
     let server = start_test_server().await;
     let client = Client::new();
     let username = format!("testuser_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
@@ -270,17 +270,17 @@ async fn test_create_server_and_channels() {
         .await
         .expect("Failed to create test user");
 
-    // Create server
-    let server_id = create_server(&client, &server.http_url(), &token, "Test Server")
+    // Create community
+    let community_id = create_community(&client, &server.http_url(), &token, "Test Community")
         .await
-        .expect("Failed to create server");
+        .expect("Failed to create community");
 
     // Get channels (should have default #general)
-    let channels = get_channels(&client, &server.http_url(), &token, server_id)
+    let channels = get_channels(&client, &server.http_url(), &token, community_id)
         .await
         .expect("Failed to get channels");
 
-    assert!(!channels.is_empty(), "Server should have default channels");
+    assert!(!channels.is_empty(), "Community should have default channels");
 
     // Find text channel
     let text_channel = channels.iter().find(|c| c["channel_type"] == "text");
@@ -323,13 +323,13 @@ async fn test_realtime_message_delivery() {
         .await
         .expect("Failed to create Bob");
 
-    // Alice creates a server
-    let server_id = create_server(&client, &server.http_url(), &alice_token, "Test Server")
+    // Alice creates a community
+    let community_id = create_community(&client, &server.http_url(), &alice_token, "Test Community")
         .await
-        .expect("Failed to create server");
+        .expect("Failed to create community");
 
     // Get the general channel
-    let channels = get_channels(&client, &server.http_url(), &alice_token, server_id)
+    let channels = get_channels(&client, &server.http_url(), &alice_token, community_id)
         .await
         .expect("Failed to get channels");
 
@@ -343,10 +343,10 @@ async fn test_realtime_message_delivery() {
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .expect("Invalid channel id");
 
-    // Bob joins the server via invite
+    // Bob joins the community via invite
     // First, Alice creates an invite
     let invite_response = client
-        .post(format!("{}/api/servers/{}/invites", server.http_url(), server_id))
+        .post(format!("{}/api/communities/{}/invites", server.http_url(), community_id))
         .header("Authorization", format!("Bearer {}", alice_token))
         .send()
         .await
@@ -361,7 +361,7 @@ async fn test_realtime_message_delivery() {
         .header("Authorization", format!("Bearer {}", bob_token))
         .send()
         .await
-        .expect("Failed to join server");
+        .expect("Failed to join community");
 
     // Connect both users to WebSocket
     let alice_ws = connect_websocket(&server.ws_url(), &alice_token)
@@ -443,13 +443,13 @@ async fn test_send_message_via_api() {
         .await
         .expect("Failed to create test user");
 
-    // Create server
-    let server_id = create_server(&client, &server.http_url(), &token, "Test Server")
+    // Create community
+    let community_id = create_community(&client, &server.http_url(), &token, "Test Community")
         .await
-        .expect("Failed to create server");
+        .expect("Failed to create community");
 
     // Get channels
-    let channels = get_channels(&client, &server.http_url(), &token, server_id)
+    let channels = get_channels(&client, &server.http_url(), &token, community_id)
         .await
         .expect("Failed to get channels");
 

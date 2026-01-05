@@ -34,8 +34,8 @@ CREATE TABLE friendships (
 CREATE INDEX idx_friendships_user1 ON friendships(user1_id);
 CREATE INDEX idx_friendships_user2 ON friendships(user2_id);
 
--- Servers table
-CREATE TABLE servers (
+-- Communities table (equivalent to Discord's "servers" or "guilds")
+CREATE TABLE communities (
     id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     description TEXT,
@@ -45,25 +45,25 @@ CREATE TABLE servers (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_servers_owner ON servers(owner_id);
+CREATE INDEX idx_communities_owner ON communities(owner_id);
 
--- Server members table
-CREATE TABLE server_members (
+-- Community members table
+CREATE TABLE community_members (
     id UUID PRIMARY KEY,
-    server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     nickname VARCHAR(64),
     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(server_id, user_id)
+    UNIQUE(community_id, user_id)
 );
 
-CREATE INDEX idx_server_members_server ON server_members(server_id);
-CREATE INDEX idx_server_members_user ON server_members(user_id);
+CREATE INDEX idx_community_members_community ON community_members(community_id);
+CREATE INDEX idx_community_members_user ON community_members(user_id);
 
--- Server roles table
-CREATE TABLE server_roles (
+-- Community roles table
+CREATE TABLE community_roles (
     id UUID PRIMARY KEY,
-    server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     name VARCHAR(64) NOT NULL,
     color VARCHAR(7), -- Hex color
     permissions BIGINT NOT NULL DEFAULT 0,
@@ -71,19 +71,19 @@ CREATE TABLE server_roles (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_server_roles_server ON server_roles(server_id);
+CREATE INDEX idx_community_roles_community ON community_roles(community_id);
 
 -- Member roles junction table
 CREATE TABLE member_roles (
-    member_id UUID NOT NULL REFERENCES server_members(id) ON DELETE CASCADE,
-    role_id UUID NOT NULL REFERENCES server_roles(id) ON DELETE CASCADE,
+    member_id UUID NOT NULL REFERENCES community_members(id) ON DELETE CASCADE,
+    role_id UUID NOT NULL REFERENCES community_roles(id) ON DELETE CASCADE,
     PRIMARY KEY (member_id, role_id)
 );
 
--- Server invites table
-CREATE TABLE server_invites (
+-- Community invites table
+CREATE TABLE community_invites (
     id UUID PRIMARY KEY,
-    server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     code VARCHAR(16) NOT NULL UNIQUE,
     created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     uses INTEGER NOT NULL DEFAULT 0,
@@ -92,12 +92,12 @@ CREATE TABLE server_invites (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_server_invites_code ON server_invites(code);
+CREATE INDEX idx_community_invites_code ON community_invites(code);
 
 -- Channels table
 CREATE TABLE channels (
     id UUID PRIMARY KEY,
-    server_id UUID REFERENCES servers(id) ON DELETE CASCADE, -- NULL for DMs
+    community_id UUID REFERENCES communities(id) ON DELETE CASCADE, -- NULL for DMs
     name VARCHAR(100) NOT NULL,
     topic TEXT,
     channel_type channel_type NOT NULL,
@@ -106,7 +106,7 @@ CREATE TABLE channels (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_channels_server ON channels(server_id);
+CREATE INDEX idx_channels_community ON channels(community_id);
 
 -- Direct message channels
 CREATE TABLE direct_message_channels (

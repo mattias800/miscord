@@ -5,22 +5,25 @@ use crate::state::AppState;
 
 use super::channel_list::ChannelList;
 use super::chat::ChatView;
-use super::server_list::ServerList;
+use super::community_list::CommunityList;
+use super::member_list::MemberList;
 use super::voice::VoicePanel;
 
 pub struct MainView {
-    server_list: ServerList,
+    community_list: CommunityList,
     channel_list: ChannelList,
     chat_view: ChatView,
+    member_list: MemberList,
     voice_panel: VoicePanel,
 }
 
 impl MainView {
     pub fn new() -> Self {
         Self {
-            server_list: ServerList::new(),
+            community_list: CommunityList::new(),
             channel_list: ChannelList::new(),
             chat_view: ChatView::new(),
+            member_list: MemberList::new(),
             voice_panel: VoicePanel::new(),
         }
     }
@@ -35,11 +38,11 @@ impl MainView {
     ) -> bool {
         let mut open_settings = false;
 
-        // Left panel - Server list
-        egui::SidePanel::left("server_panel")
+        // Left panel - Community list
+        egui::SidePanel::left("community_panel")
             .exact_width(72.0)
             .show(ctx, |ui| {
-                self.server_list.show(ui, state, network, runtime);
+                self.community_list.show(ui, state, network, runtime);
             });
 
         // Channel list panel
@@ -62,8 +65,11 @@ impl MainView {
                 });
             });
 
-        // Right panel - Voice participants (if in voice)
-        let in_voice = runtime.block_on(async { state.read().await.voice_channel_id.is_some() });
+        // Right panel - Voice participants (if in voice) or Member list
+        let (in_voice, has_community) = runtime.block_on(async {
+            let s = state.read().await;
+            (s.voice_channel_id.is_some(), s.current_community_id.is_some())
+        });
 
         if in_voice {
             egui::SidePanel::right("voice_panel")
@@ -71,6 +77,14 @@ impl MainView {
                 .max_width(300.0)
                 .show(ctx, |ui| {
                     self.voice_panel.show_participants(ui, state, runtime);
+                });
+        } else if has_community {
+            egui::SidePanel::right("member_panel")
+                .exact_width(240.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.member_list.show(ui, state, runtime);
+                    });
                 });
         }
 

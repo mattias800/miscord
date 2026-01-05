@@ -13,11 +13,11 @@ impl ChannelService {
         Self { db }
     }
 
-    pub async fn create(&self, server_id: Uuid, input: CreateChannel) -> Result<Channel> {
+    pub async fn create(&self, community_id: Uuid, input: CreateChannel) -> Result<Channel> {
         // Get the next position
         let max_position: Option<i32> = sqlx::query_scalar!(
-            "SELECT MAX(position) FROM channels WHERE server_id = $1",
-            server_id
+            "SELECT MAX(position) FROM channels WHERE community_id = $1",
+            community_id
         )
         .fetch_one(&self.db)
         .await?;
@@ -27,13 +27,13 @@ impl ChannelService {
         let channel = sqlx::query_as!(
             Channel,
             r#"
-            INSERT INTO channels (id, server_id, name, topic, channel_type, position, created_at, updated_at)
+            INSERT INTO channels (id, community_id, name, topic, channel_type, position, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-            RETURNING id, server_id, name, topic, channel_type as "channel_type: ChannelType",
+            RETURNING id, community_id, name, topic, channel_type as "channel_type: ChannelType",
                       position, created_at, updated_at
             "#,
             Uuid::new_v4(),
-            server_id,
+            community_id,
             input.name,
             input.topic,
             input.channel_type as ChannelType,
@@ -49,7 +49,7 @@ impl ChannelService {
         let channel = sqlx::query_as!(
             Channel,
             r#"
-            SELECT id, server_id, name, topic, channel_type as "channel_type: ChannelType",
+            SELECT id, community_id, name, topic, channel_type as "channel_type: ChannelType",
                    position, created_at, updated_at
             FROM channels WHERE id = $1
             "#,
@@ -62,16 +62,16 @@ impl ChannelService {
         Ok(channel)
     }
 
-    pub async fn list_by_server(&self, server_id: Uuid) -> Result<Vec<Channel>> {
+    pub async fn list_by_community(&self, community_id: Uuid) -> Result<Vec<Channel>> {
         let channels = sqlx::query_as!(
             Channel,
             r#"
-            SELECT id, server_id, name, topic, channel_type as "channel_type: ChannelType",
+            SELECT id, community_id, name, topic, channel_type as "channel_type: ChannelType",
                    position, created_at, updated_at
-            FROM channels WHERE server_id = $1
+            FROM channels WHERE community_id = $1
             ORDER BY position
             "#,
-            server_id
+            community_id
         )
         .fetch_all(&self.db)
         .await?;
@@ -88,7 +88,7 @@ impl ChannelService {
                 topic = COALESCE($3, topic),
                 updated_at = NOW()
             WHERE id = $1
-            RETURNING id, server_id, name, topic, channel_type as "channel_type: ChannelType",
+            RETURNING id, community_id, name, topic, channel_type as "channel_type: ChannelType",
                       position, created_at, updated_at
             "#,
             id,
@@ -202,7 +202,7 @@ impl ChannelService {
         let existing = sqlx::query_as!(
             Channel,
             r#"
-            SELECT c.id, c.server_id, c.name, c.topic, c.channel_type as "channel_type: ChannelType",
+            SELECT c.id, c.community_id, c.name, c.topic, c.channel_type as "channel_type: ChannelType",
                    c.position, c.created_at, c.updated_at
             FROM channels c
             INNER JOIN direct_message_channels dm ON c.id = dm.channel_id
@@ -223,9 +223,9 @@ impl ChannelService {
         let channel = sqlx::query_as!(
             Channel,
             r#"
-            INSERT INTO channels (id, server_id, name, topic, channel_type, position, created_at, updated_at)
+            INSERT INTO channels (id, community_id, name, topic, channel_type, position, created_at, updated_at)
             VALUES ($1, NULL, 'Direct Message', NULL, $2, 0, NOW(), NOW())
-            RETURNING id, server_id, name, topic, channel_type as "channel_type: ChannelType",
+            RETURNING id, community_id, name, topic, channel_type as "channel_type: ChannelType",
                       position, created_at, updated_at
             "#,
             channel_id,
@@ -254,7 +254,7 @@ impl ChannelService {
         let channels = sqlx::query_as!(
             Channel,
             r#"
-            SELECT c.id, c.server_id, c.name, c.topic, c.channel_type as "channel_type: ChannelType",
+            SELECT c.id, c.community_id, c.name, c.topic, c.channel_type as "channel_type: ChannelType",
                    c.position, c.created_at, c.updated_at
             FROM channels c
             INNER JOIN direct_message_channels dm ON c.id = dm.channel_id

@@ -6,6 +6,7 @@ use crate::state::AppState;
 use super::login::LoginView;
 use super::main_view::MainView;
 use super::settings::SettingsView;
+use super::theme;
 
 pub struct MiscordApp {
     state: AppState,
@@ -26,9 +27,37 @@ enum View {
 
 impl MiscordApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Set up custom fonts and style
+        // Set up Discord-like dark theme
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+
+        // Apply Discord colors to visuals
+        let visuals = &mut style.visuals;
+        visuals.dark_mode = true;
+        visuals.panel_fill = theme::BG_SECONDARY;
+        visuals.window_fill = theme::BG_PRIMARY;
+        visuals.extreme_bg_color = theme::BG_TERTIARY;
+        visuals.faint_bg_color = theme::BG_ACCENT;
+
+        // Widget styling
+        visuals.widgets.noninteractive.bg_fill = theme::BG_PRIMARY;
+        visuals.widgets.inactive.bg_fill = theme::BG_PRIMARY;
+        visuals.widgets.hovered.bg_fill = theme::BG_ACCENT;
+        visuals.widgets.active.bg_fill = theme::BLURPLE;
+
+        // Text colors
+        visuals.widgets.noninteractive.fg_stroke.color = theme::TEXT_NORMAL;
+        visuals.widgets.inactive.fg_stroke.color = theme::TEXT_MUTED;
+        visuals.widgets.hovered.fg_stroke.color = theme::TEXT_NORMAL;
+        visuals.widgets.active.fg_stroke.color = theme::TEXT_NORMAL;
+
+        // Selection color
+        visuals.selection.bg_fill = theme::BLURPLE;
+        visuals.selection.stroke.color = theme::TEXT_NORMAL;
+
+        // Hyperlinks
+        visuals.hyperlink_color = theme::TEXT_LINK;
+
         cc.egui_ctx.set_style(style);
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -92,9 +121,9 @@ impl eframe::App for MiscordApp {
                     let network = self.network.clone();
                     self.runtime.block_on(async {
                         state.set_auth(token, user).await;
-                        // Load servers before switching to Main view
-                        if let Err(e) = network.load_servers().await {
-                            tracing::error!("Failed to load servers: {}", e);
+                        // Load communities before switching to Main view
+                        if let Err(e) = network.load_communities().await {
+                            tracing::error!("Failed to load communities: {}", e);
                         }
                     });
                     self.view = View::Main;

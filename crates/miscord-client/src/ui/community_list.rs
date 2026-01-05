@@ -1,21 +1,21 @@
 use eframe::egui;
-use uuid::Uuid;
 
 use crate::network::NetworkClient;
 use crate::state::AppState;
+use super::theme;
 
-pub struct ServerList {
+pub struct CommunityList {
     show_create_dialog: bool,
-    new_server_name: String,
+    new_community_name: String,
     show_join_dialog: bool,
     invite_code: String,
 }
 
-impl ServerList {
+impl CommunityList {
     pub fn new() -> Self {
         Self {
             show_create_dialog: false,
-            new_server_name: String::new(),
+            new_community_name: String::new(),
             show_join_dialog: false,
             invite_code: String::new(),
         }
@@ -43,25 +43,25 @@ impl ServerList {
             ui.separator();
             ui.add_space(8.0);
 
-            // Server list
-            let servers = runtime.block_on(async {
+            // Community list
+            let communities = runtime.block_on(async {
                 let s = state.read().await;
-                s.servers.values().cloned().collect::<Vec<_>>()
+                s.communities.values().cloned().collect::<Vec<_>>()
             });
 
-            let current_server = runtime.block_on(async {
-                state.read().await.current_server_id
+            let current_community = runtime.block_on(async {
+                state.read().await.current_community_id
             });
 
-            for server in servers {
-                let is_selected = current_server == Some(server.id);
+            for community in communities {
+                let is_selected = current_community == Some(community.id);
 
-                let button = egui::Button::new(&server.name[..1].to_uppercase())
+                let button = egui::Button::new(&community.name[..1].to_uppercase())
                     .min_size(egui::vec2(48.0, 48.0))
                     .fill(if is_selected {
-                        egui::Color32::from_rgb(88, 101, 242)
+                        theme::BLURPLE
                     } else {
-                        egui::Color32::from_rgb(54, 57, 63)
+                        theme::BG_PRIMARY
                     });
 
                 let response = ui.add(button);
@@ -69,62 +69,67 @@ impl ServerList {
                 if response.clicked() {
                     let state = state.clone();
                     let network = network.clone();
-                    let server_id = server.id;
+                    let community_id = community.id;
 
                     runtime.spawn(async move {
-                        state.select_server(server_id).await;
+                        state.select_community(community_id).await;
 
-                        // Load channels for this server
-                        if let Ok(channels) = network.get_channels(server_id).await {
+                        // Load channels for this community
+                        if let Ok(channels) = network.get_channels(community_id).await {
                             state.set_channels(channels).await;
+                        }
+
+                        // Load members for this community
+                        if let Ok(members) = network.get_members(community_id).await {
+                            state.set_members(community_id, members).await;
                         }
                     });
                 }
 
-                response.on_hover_text(&server.name);
+                response.on_hover_text(&community.name);
             }
 
             ui.add_space(8.0);
 
-            // Add server button
+            // Add community button
             let add_button = egui::Button::new("+")
                 .min_size(egui::vec2(48.0, 48.0));
 
-            if ui.add(add_button).on_hover_text("Add a Server").clicked() {
+            if ui.add(add_button).on_hover_text("Add a Community").clicked() {
                 self.show_create_dialog = true;
             }
         });
 
-        // Create server dialog
+        // Create community dialog
         if self.show_create_dialog {
-            egui::Window::new("Create Server")
+            egui::Window::new("Create Community")
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Name:");
-                        ui.text_edit_singleline(&mut self.new_server_name);
+                        ui.text_edit_singleline(&mut self.new_community_name);
                     });
 
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
-                            let name = self.new_server_name.clone();
+                            let name = self.new_community_name.clone();
                             let network = network.clone();
                             let state = state.clone();
 
                             runtime.spawn(async move {
-                                if let Ok(server) = network.create_server(&name).await {
+                                if let Ok(community) = network.create_community(&name).await {
                                     let mut s = state.write().await;
-                                    s.servers.insert(server.id, server);
+                                    s.communities.insert(community.id, community);
                                 }
                             });
 
-                            self.new_server_name.clear();
+                            self.new_community_name.clear();
                             self.show_create_dialog = false;
                         }
 
                         if ui.button("Cancel").clicked() {
-                            self.new_server_name.clear();
+                            self.new_community_name.clear();
                             self.show_create_dialog = false;
                         }
                     });
@@ -138,9 +143,9 @@ impl ServerList {
                 });
         }
 
-        // Join server dialog
+        // Join community dialog
         if self.show_join_dialog {
-            egui::Window::new("Join Server")
+            egui::Window::new("Join Community")
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
@@ -156,9 +161,9 @@ impl ServerList {
                             let state = state.clone();
 
                             runtime.spawn(async move {
-                                if let Ok(server) = network.join_server(&code).await {
+                                if let Ok(community) = network.join_community(&code).await {
                                     let mut s = state.write().await;
-                                    s.servers.insert(server.id, server);
+                                    s.communities.insert(community.id, community);
                                 }
                             });
 
@@ -176,7 +181,7 @@ impl ServerList {
     }
 }
 
-impl Default for ServerList {
+impl Default for CommunityList {
     fn default() -> Self {
         Self::new()
     }

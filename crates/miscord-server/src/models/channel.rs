@@ -6,7 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Channel {
     pub id: Uuid,
-    pub server_id: Option<Uuid>, // None for DMs
+    pub community_id: Option<Uuid>, // None for DMs
     pub name: String,
     pub topic: Option<String>,
     pub channel_type: ChannelType,

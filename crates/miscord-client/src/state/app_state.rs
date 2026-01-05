@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use miscord_protocol::{ChannelData, MessageData, ServerData, UserData};
+use miscord_protocol::{ChannelData, CommunityData, MessageData, UserData};
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -17,9 +17,9 @@ pub struct AppStateInner {
     pub current_user: Option<UserData>,
     pub auth_token: Option<String>,
 
-    // Servers
-    pub servers: HashMap<Uuid, ServerData>,
-    pub current_server_id: Option<Uuid>,
+    // Communities
+    pub communities: HashMap<Uuid, CommunityData>,
+    pub current_community_id: Option<Uuid>,
 
     // Channels
     pub channels: HashMap<Uuid, ChannelData>,
@@ -30,6 +30,9 @@ pub struct AppStateInner {
 
     // Users
     pub users: HashMap<Uuid, UserData>,
+
+    // Community members (community_id -> list of members)
+    pub members: HashMap<Uuid, Vec<UserData>>,
 
     // Typing indicators (channel_id -> (user_id -> started_at))
     pub typing_users: HashMap<Uuid, HashMap<Uuid, Instant>>,
@@ -66,12 +69,13 @@ impl Default for AppStateInner {
         Self {
             current_user: None,
             auth_token: None,
-            servers: HashMap::new(),
-            current_server_id: None,
+            communities: HashMap::new(),
+            current_community_id: None,
             channels: HashMap::new(),
             current_channel_id: None,
             messages: HashMap::new(),
             users: HashMap::new(),
+            members: HashMap::new(),
             typing_users: HashMap::new(),
             voice_channel_id: None,
             voice_participants: HashMap::new(),
@@ -143,7 +147,7 @@ impl AppState {
         let mut state = self.inner.write().await;
         state.auth_token = None;
         state.current_user = None;
-        state.servers.clear();
+        state.communities.clear();
         state.channels.clear();
         state.messages.clear();
     }
@@ -161,9 +165,9 @@ impl AppState {
             .push(message);
     }
 
-    pub async fn set_servers(&self, servers: Vec<ServerData>) {
+    pub async fn set_communities(&self, communities: Vec<CommunityData>) {
         let mut state = self.inner.write().await;
-        state.servers = servers.into_iter().map(|s| (s.id, s)).collect();
+        state.communities = communities.into_iter().map(|c| (c.id, c)).collect();
     }
 
     pub async fn set_channels(&self, channels: Vec<ChannelData>) {
@@ -173,10 +177,15 @@ impl AppState {
         }
     }
 
-    pub async fn select_server(&self, server_id: Uuid) {
+    pub async fn select_community(&self, community_id: Uuid) {
         let mut state = self.inner.write().await;
-        state.current_server_id = Some(server_id);
+        state.current_community_id = Some(community_id);
         state.current_channel_id = None;
+    }
+
+    pub async fn set_members(&self, community_id: Uuid, members: Vec<UserData>) {
+        let mut state = self.inner.write().await;
+        state.members.insert(community_id, members);
     }
 
     pub async fn select_channel(&self, channel_id: Uuid) {

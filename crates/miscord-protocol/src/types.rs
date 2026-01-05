@@ -24,9 +24,9 @@ pub enum UserStatus {
     Invisible,
 }
 
-/// Server (guild) data
+/// Community data (equivalent to Discord's "server" or "guild")
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerData {
+pub struct CommunityData {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
@@ -39,7 +39,7 @@ pub struct ServerData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelData {
     pub id: Uuid,
-    pub server_id: Option<Uuid>,
+    pub community_id: Option<Uuid>,
     pub name: String,
     pub topic: Option<String>,
     pub channel_type: ChannelType,

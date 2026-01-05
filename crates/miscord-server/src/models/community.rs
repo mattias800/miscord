@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-/// A "Server" in Discord terminology - a community with channels
+/// A Community - a group with channels and members
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Server {
+pub struct Community {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
@@ -16,18 +16,18 @@ pub struct Server {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct ServerMember {
+pub struct CommunityMember {
     pub id: Uuid,
-    pub server_id: Uuid,
+    pub community_id: Uuid,
     pub user_id: Uuid,
     pub nickname: Option<String>,
     pub joined_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct ServerRole {
+pub struct CommunityRole {
     pub id: Uuid,
-    pub server_id: Uuid,
+    pub community_id: Uuid,
     pub name: String,
     pub color: Option<String>,
     pub permissions: i64,
@@ -36,23 +36,23 @@ pub struct ServerRole {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateServer {
+pub struct CreateCommunity {
     pub name: String,
     pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateServer {
+pub struct UpdateCommunity {
     pub name: Option<String>,
     pub description: Option<String>,
     pub icon_url: Option<String>,
 }
 
-/// Invite link to join a server
+/// Invite link to join a community
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct ServerInvite {
+pub struct CommunityInvite {
     pub id: Uuid,
-    pub server_id: Uuid,
+    pub community_id: Uuid,
     pub code: String,
     pub created_by: Uuid,
     pub uses: i32,

@@ -1,6 +1,6 @@
 use crate::auth::AuthUser;
 use crate::error::{AppError, Result};
-use crate::models::{Channel, CreateChannel, CreateServer, Server, ServerInvite, UpdateServer};
+use crate::models::{Channel, Community, CommunityInvite, CreateChannel, CreateCommunity, PublicUser, UpdateCommunity, UserStatus};
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
@@ -9,15 +9,15 @@ use axum::{
 use rand::Rng;
 use uuid::Uuid;
 
-pub async fn create_server(
+pub async fn create_community(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(input): Json<CreateServer>,
-) -> Result<Json<Server>> {
-    let server = sqlx::query_as!(
-        Server,
+    Json(input): Json<CreateCommunity>,
+) -> Result<Json<Community>> {
+    let community = sqlx::query_as!(
+        Community,
         r#"
-        INSERT INTO servers (id, name, description, owner_id, created_at, updated_at)
+        INSERT INTO communities (id, name, description, owner_id, created_at, updated_at)
         VALUES ($1, $2, $3, $4, NOW(), NOW())
         RETURNING id, name, description, icon_url, owner_id, created_at, updated_at
         "#,
@@ -32,11 +32,11 @@ pub async fn create_server(
     // Add owner as a member
     sqlx::query!(
         r#"
-        INSERT INTO server_members (id, server_id, user_id, joined_at)
+        INSERT INTO community_members (id, community_id, user_id, joined_at)
         VALUES ($1, $2, $3, NOW())
         "#,
         Uuid::new_v4(),
-        server.id,
+        community.id,
         auth.user_id
     )
     .execute(&state.db)
@@ -46,7 +46,7 @@ pub async fn create_server(
     state
         .channel_service
         .create(
-            server.id,
+            community.id,
             CreateChannel {
                 name: "general".to_string(),
                 topic: Some("General discussion".to_string()),
@@ -58,7 +58,7 @@ pub async fn create_server(
     state
         .channel_service
         .create(
-            server.id,
+            community.id,
             CreateChannel {
                 name: "General".to_string(),
                 topic: Some("Voice chat".to_string()),
@@ -67,38 +67,38 @@ pub async fn create_server(
         )
         .await?;
 
-    Ok(Json(server))
+    Ok(Json(community))
 }
 
-pub async fn list_servers(
+pub async fn list_communities(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<Vec<Server>>> {
-    let servers = sqlx::query_as!(
-        Server,
+) -> Result<Json<Vec<Community>>> {
+    let communities = sqlx::query_as!(
+        Community,
         r#"
-        SELECT s.id, s.name, s.description, s.icon_url, s.owner_id, s.created_at, s.updated_at
-        FROM servers s
-        INNER JOIN server_members m ON s.id = m.server_id
+        SELECT c.id, c.name, c.description, c.icon_url, c.owner_id, c.created_at, c.updated_at
+        FROM communities c
+        INNER JOIN community_members m ON c.id = m.community_id
         WHERE m.user_id = $1
-        ORDER BY s.name
+        ORDER BY c.name
         "#,
         auth.user_id
     )
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(servers))
+    Ok(Json(communities))
 }
 
-pub async fn get_server(
+pub async fn get_community(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> Result<Json<Server>> {
+) -> Result<Json<Community>> {
     // Check membership
     let is_member = sqlx::query_scalar!(
-        "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)",
+        "SELECT EXISTS(SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2)",
         id,
         auth.user_id
     )
@@ -110,48 +110,48 @@ pub async fn get_server(
         return Err(AppError::Forbidden);
     }
 
-    let server = sqlx::query_as!(
-        Server,
+    let community = sqlx::query_as!(
+        Community,
         r#"
         SELECT id, name, description, icon_url, owner_id, created_at, updated_at
-        FROM servers WHERE id = $1
+        FROM communities WHERE id = $1
         "#,
         id
     )
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Server not found".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("Community not found".to_string()))?;
 
-    Ok(Json(server))
+    Ok(Json(community))
 }
 
-pub async fn update_server(
+pub async fn update_community(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(input): Json<UpdateServer>,
-) -> Result<Json<Server>> {
+    Json(input): Json<UpdateCommunity>,
+) -> Result<Json<Community>> {
     // Check ownership
-    let server = sqlx::query_as!(
-        Server,
+    let community = sqlx::query_as!(
+        Community,
         r#"
         SELECT id, name, description, icon_url, owner_id, created_at, updated_at
-        FROM servers WHERE id = $1
+        FROM communities WHERE id = $1
         "#,
         id
     )
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Server not found".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("Community not found".to_string()))?;
 
-    if server.owner_id != auth.user_id {
+    if community.owner_id != auth.user_id {
         return Err(AppError::Forbidden);
     }
 
     let updated = sqlx::query_as!(
-        Server,
+        Community,
         r#"
-        UPDATE servers
+        UPDATE communities
         SET name = COALESCE($2, name),
             description = COALESCE($3, description),
             icon_url = COALESCE($4, icon_url),
@@ -170,26 +170,26 @@ pub async fn update_server(
     Ok(Json(updated))
 }
 
-pub async fn delete_server(
+pub async fn delete_community(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<()> {
     // Check ownership
-    let server = sqlx::query_as!(
-        Server,
-        "SELECT id, name, description, icon_url, owner_id, created_at, updated_at FROM servers WHERE id = $1",
+    let community = sqlx::query_as!(
+        Community,
+        "SELECT id, name, description, icon_url, owner_id, created_at, updated_at FROM communities WHERE id = $1",
         id
     )
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Server not found".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("Community not found".to_string()))?;
 
-    if server.owner_id != auth.user_id {
+    if community.owner_id != auth.user_id {
         return Err(AppError::Forbidden);
     }
 
-    sqlx::query!("DELETE FROM servers WHERE id = $1", id)
+    sqlx::query!("DELETE FROM communities WHERE id = $1", id)
         .execute(&state.db)
         .await?;
 
@@ -199,12 +199,12 @@ pub async fn delete_server(
 pub async fn list_channels(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(server_id): Path<Uuid>,
+    Path(community_id): Path<Uuid>,
 ) -> Result<Json<Vec<Channel>>> {
     // Check membership
     let is_member = sqlx::query_scalar!(
-        "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)",
-        server_id,
+        "SELECT EXISTS(SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2)",
+        community_id,
         auth.user_id
     )
     .fetch_one(&state.db)
@@ -215,43 +215,43 @@ pub async fn list_channels(
         return Err(AppError::Forbidden);
     }
 
-    let channels = state.channel_service.list_by_server(server_id).await?;
+    let channels = state.channel_service.list_by_community(community_id).await?;
     Ok(Json(channels))
 }
 
 pub async fn create_channel(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(server_id): Path<Uuid>,
+    Path(community_id): Path<Uuid>,
     Json(input): Json<CreateChannel>,
 ) -> Result<Json<Channel>> {
     // Check ownership (only owner can create channels for now)
-    let server = sqlx::query_as!(
-        Server,
-        "SELECT id, name, description, icon_url, owner_id, created_at, updated_at FROM servers WHERE id = $1",
-        server_id
+    let community = sqlx::query_as!(
+        Community,
+        "SELECT id, name, description, icon_url, owner_id, created_at, updated_at FROM communities WHERE id = $1",
+        community_id
     )
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Server not found".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("Community not found".to_string()))?;
 
-    if server.owner_id != auth.user_id {
+    if community.owner_id != auth.user_id {
         return Err(AppError::Forbidden);
     }
 
-    let channel = state.channel_service.create(server_id, input).await?;
+    let channel = state.channel_service.create(community_id, input).await?;
     Ok(Json(channel))
 }
 
 pub async fn create_invite(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(server_id): Path<Uuid>,
-) -> Result<Json<ServerInvite>> {
+    Path(community_id): Path<Uuid>,
+) -> Result<Json<CommunityInvite>> {
     // Check membership
     let is_member = sqlx::query_scalar!(
-        "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)",
-        server_id,
+        "SELECT EXISTS(SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2)",
+        community_id,
         auth.user_id
     )
     .fetch_one(&state.db)
@@ -270,14 +270,14 @@ pub async fn create_invite(
         .collect();
 
     let invite = sqlx::query_as!(
-        ServerInvite,
+        CommunityInvite,
         r#"
-        INSERT INTO server_invites (id, server_id, code, created_by, uses, created_at)
+        INSERT INTO community_invites (id, community_id, code, created_by, uses, created_at)
         VALUES ($1, $2, $3, $4, 0, NOW())
-        RETURNING id, server_id, code, created_by, uses, max_uses, expires_at, created_at
+        RETURNING id, community_id, code, created_by, uses, max_uses, expires_at, created_at
         "#,
         Uuid::new_v4(),
-        server_id,
+        community_id,
         code,
         auth.user_id
     )
@@ -287,17 +287,17 @@ pub async fn create_invite(
     Ok(Json(invite))
 }
 
-pub async fn join_server(
+pub async fn join_community(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(code): Path<String>,
-) -> Result<Json<Server>> {
+) -> Result<Json<Community>> {
     // Find the invite
     let invite = sqlx::query_as!(
-        ServerInvite,
+        CommunityInvite,
         r#"
-        SELECT id, server_id, code, created_by, uses, max_uses, expires_at, created_at
-        FROM server_invites WHERE code = $1
+        SELECT id, community_id, code, created_by, uses, max_uses, expires_at, created_at
+        FROM community_invites WHERE code = $1
         "#,
         code
     )
@@ -320,8 +320,8 @@ pub async fn join_server(
 
     // Check if already a member
     let is_member = sqlx::query_scalar!(
-        "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)",
-        invite.server_id,
+        "SELECT EXISTS(SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2)",
+        invite.community_id,
         auth.user_id
     )
     .fetch_one(&state.db)
@@ -331,9 +331,9 @@ pub async fn join_server(
     if !is_member {
         // Add as member
         sqlx::query!(
-            "INSERT INTO server_members (id, server_id, user_id, joined_at) VALUES ($1, $2, $3, NOW())",
+            "INSERT INTO community_members (id, community_id, user_id, joined_at) VALUES ($1, $2, $3, NOW())",
             Uuid::new_v4(),
-            invite.server_id,
+            invite.community_id,
             auth.user_id
         )
         .execute(&state.db)
@@ -341,20 +341,58 @@ pub async fn join_server(
 
         // Increment uses
         sqlx::query!(
-            "UPDATE server_invites SET uses = uses + 1 WHERE id = $1",
+            "UPDATE community_invites SET uses = uses + 1 WHERE id = $1",
             invite.id
         )
         .execute(&state.db)
         .await?;
     }
 
-    let server = sqlx::query_as!(
-        Server,
-        "SELECT id, name, description, icon_url, owner_id, created_at, updated_at FROM servers WHERE id = $1",
-        invite.server_id
+    let community = sqlx::query_as!(
+        Community,
+        "SELECT id, name, description, icon_url, owner_id, created_at, updated_at FROM communities WHERE id = $1",
+        invite.community_id
     )
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(server))
+    Ok(Json(community))
+}
+
+pub async fn list_members(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(community_id): Path<Uuid>,
+) -> Result<Json<Vec<PublicUser>>> {
+    // Check membership
+    let is_member = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2)",
+        community_id,
+        auth.user_id
+    )
+    .fetch_one(&state.db)
+    .await?
+    .unwrap_or(false);
+
+    if !is_member {
+        return Err(AppError::Forbidden);
+    }
+
+    // Get all members with their user data
+    let members = sqlx::query_as!(
+        PublicUser,
+        r#"
+        SELECT u.id, u.username, u.display_name, u.avatar_url,
+               u.status as "status: UserStatus", u.custom_status
+        FROM users u
+        INNER JOIN community_members m ON u.id = m.user_id
+        WHERE m.community_id = $1
+        ORDER BY u.display_name
+        "#,
+        community_id
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(members))
 }
