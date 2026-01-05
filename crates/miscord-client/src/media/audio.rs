@@ -189,9 +189,9 @@ impl AudioPlayback {
         let sample_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
         let buffer_clone = sample_buffer.clone();
 
-        // Spawn task to receive samples
-        tokio::spawn(async move {
-            while let Some(samples) = rx.recv().await {
+        // Spawn thread to receive samples (using std::thread to avoid Tokio runtime requirement)
+        std::thread::spawn(move || {
+            while let Some(samples) = rx.blocking_recv() {
                 let mut buffer = buffer_clone.lock().unwrap();
                 buffer.extend(samples);
             }
