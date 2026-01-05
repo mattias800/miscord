@@ -16,6 +16,7 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "channel_type", rename_all = "snake_case")]
 pub enum ChannelType {
     Text,
@@ -77,3 +78,4 @@ pub struct UpdateChannel {
     pub name: Option<String>,
     pub topic: Option<String>,
 }
+

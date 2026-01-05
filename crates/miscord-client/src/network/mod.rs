@@ -85,7 +85,7 @@ impl NetworkClient {
 
     // Servers
 
-    async fn load_servers(&self) -> Result<()> {
+    pub async fn load_servers(&self) -> Result<()> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
@@ -122,8 +122,9 @@ impl NetworkClient {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
-        api::post_empty(
+        api::post::<ServerData, _>(
             &format!("{}/api/invites/{}", server_url, invite_code),
+            &(),
             token.as_deref(),
         )
         .await
@@ -210,13 +211,11 @@ impl NetworkClient {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
-        api::post_empty(
+        api::post_empty_void(
             &format!("{}/api/channels/{}/voice/join", server_url, channel_id),
             token.as_deref(),
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     pub async fn leave_voice(&self) {
@@ -227,7 +226,7 @@ impl NetworkClient {
 
         let token = self.get_token().await;
 
-        let _ = api::post_empty::<()>(
+        let _ = api::post_empty_void(
             &format!("{}/api/voice/leave", server_url),
             token.as_deref(),
         )
@@ -256,7 +255,7 @@ impl NetworkClient {
             screen_sharing: Option<bool>,
         }
 
-        api::patch(
+        api::patch_empty(
             &format!("{}/api/voice/state", server_url),
             &UpdateVoiceState {
                 self_muted,
@@ -266,8 +265,6 @@ impl NetworkClient {
             },
             token.as_deref(),
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 }

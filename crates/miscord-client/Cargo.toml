@@ -54,8 +54,8 @@ reqwest = { version = "0.12", features = ["json"] }
 # Futures
 futures = "0.3"
 
-# Screen capture (cross-platform)
-xcap = "0.0.14"
+# Screen capture (cross-platform) - TODO: Fix type annotation issues
+# xcap = "0.0.14"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.59", features = [

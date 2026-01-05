@@ -64,17 +64,27 @@ impl eframe::App for MiscordApp {
 
         match &self.view {
             View::Login => {
-                if let Some((token, user)) =
+                // Try auto-login first if credentials are available
+                let login_result = if self.login_view.should_auto_login() {
                     self.login_view
-                        .show(ctx, &self.network, &self.runtime)
-                {
+                        .try_auto_login(&self.network, &self.runtime)
+                } else {
+                    self.login_view.show(ctx, &self.network, &self.runtime)
+                };
+
+                if let Some((token, user)) = login_result {
                     let state = self.state.clone();
+                    let network = self.network.clone();
                     self.runtime.block_on(async {
                         state.set_auth(token, user).await;
+                        // Load servers before switching to Main view
+                        if let Err(e) = network.load_servers().await {
+                            tracing::error!("Failed to load servers: {}", e);
+                        }
                     });
                     self.view = View::Main;
 
-                    // Connect WebSocket and load initial data
+                    // Connect WebSocket in background
                     let network = self.network.clone();
                     self.runtime.spawn(async move {
                         if let Err(e) = network.connect().await {

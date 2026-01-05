@@ -13,6 +13,7 @@ pub struct LoginView {
     server_url: String,
     error: Option<String>,
     is_loading: bool,
+    auto_login_attempted: bool,
 }
 
 enum LoginMode {
@@ -20,18 +21,80 @@ enum LoginMode {
     Register,
 }
 
+/// Configuration loaded from environment variables
+pub struct AutoLoginConfig {
+    pub server_url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl AutoLoginConfig {
+    pub fn from_env() -> Self {
+        Self {
+            server_url: std::env::var("MISCORD_SERVER_URL").ok(),
+            username: std::env::var("MISCORD_AUTO_LOGIN_USER").ok(),
+            password: std::env::var("MISCORD_AUTO_LOGIN_PASS").ok(),
+        }
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
+    }
+}
+
 impl LoginView {
     pub fn new() -> Self {
+        let config = AutoLoginConfig::from_env();
+
         Self {
             mode: LoginMode::Login,
-            username: String::new(),
-            password: String::new(),
+            username: config.username.clone().unwrap_or_default(),
+            password: config.password.clone().unwrap_or_default(),
             email: String::new(),
             display_name: String::new(),
-            server_url: "http://localhost:8080".to_string(),
+            server_url: config
+                .server_url
+                .unwrap_or_else(|| "http://localhost:8080".to_string()),
             error: None,
             is_loading: false,
+            auto_login_attempted: false,
         }
+    }
+
+    /// Check if auto-login should be attempted
+    pub fn should_auto_login(&self) -> bool {
+        !self.auto_login_attempted && AutoLoginConfig::from_env().has_credentials()
+    }
+
+    /// Attempt automatic login using environment credentials
+    pub fn try_auto_login(
+        &mut self,
+        network: &NetworkClient,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Option<(String, UserData)> {
+        self.auto_login_attempted = true;
+
+        let config = AutoLoginConfig::from_env();
+
+        if let (Some(username), Some(password)) = (config.username, config.password) {
+            tracing::info!("Attempting auto-login as {}", username);
+
+            let request = LoginRequest { username, password };
+            let server_url = self.server_url.clone();
+
+            match runtime.block_on(network.login(&server_url, request)) {
+                Ok((token, user)) => {
+                    tracing::info!("Auto-login successful");
+                    return Some((token, user));
+                }
+                Err(e) => {
+                    tracing::warn!("Auto-login failed: {}", e);
+                    self.error = Some(format!("Auto-login failed: {}", e));
+                }
+            }
+        }
+
+        None
     }
 
     pub fn show(

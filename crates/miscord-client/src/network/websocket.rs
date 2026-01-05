@@ -153,28 +153,30 @@ impl WebSocketClient {
                 }
             }
             ServerMessage::UserTyping { channel_id, user_id } => {
-                // TODO: Show typing indicator
+                state.set_user_typing(channel_id, user_id).await;
+                tracing::debug!("User {} is typing in channel {}", user_id, channel_id);
             }
             ServerMessage::UserStoppedTyping { channel_id, user_id } => {
-                // TODO: Hide typing indicator
+                state.clear_user_typing(channel_id, user_id).await;
+                tracing::debug!("User {} stopped typing in channel {}", user_id, channel_id);
             }
             ServerMessage::ChannelSubscribed { channel_id } => {
                 tracing::debug!("Subscribed to channel {}", channel_id);
             }
             ServerMessage::RtcOffer { from_user_id, sdp } => {
-                // TODO: Handle WebRTC offer
                 tracing::debug!("Received RTC offer from {}", from_user_id);
+                state.add_rtc_offer(from_user_id, sdp).await;
             }
             ServerMessage::RtcAnswer { from_user_id, sdp } => {
-                // TODO: Handle WebRTC answer
                 tracing::debug!("Received RTC answer from {}", from_user_id);
+                state.add_rtc_answer(from_user_id, sdp).await;
             }
             ServerMessage::RtcIceCandidate {
                 from_user_id,
                 candidate,
             } => {
-                // TODO: Handle ICE candidate
                 tracing::debug!("Received ICE candidate from {}", from_user_id);
+                state.add_ice_candidate(from_user_id, candidate).await;
             }
             ServerMessage::Pong => {
                 // Heartbeat response

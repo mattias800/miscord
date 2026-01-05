@@ -1,14 +1,13 @@
 use crate::error::{AppError, Result};
+use crate::state::AppState;
 use axum::{
-    async_trait,
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
-    RequestPartsExt,
+    http::{header::AUTHORIZATION, request::Parts},
 };
-use axum_extra::{headers, TypedHeader};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,38 +52,45 @@ pub fn verify_token(token: &str, secret: &str) -> Result<Claims> {
     Ok(token_data.claims)
 }
 
-/// Extractor for authenticated requests
+/// Authenticated user extractor
 pub struct AuthUser {
     pub user_id: Uuid,
     pub username: String,
 }
 
-#[async_trait]
-impl<S> FromRequestParts<S> for AuthUser
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> std::result::Result<Self, Self::Rejection> {
-        // Get the authorization header
-        let TypedHeader(auth_header) = parts
-            .extract::<TypedHeader<headers::Authorization<headers::authorization::Bearer>>>()
-            .await
-            .map_err(|_| AppError::Unauthorized)?;
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
+        // Extract the Authorization header
+        let auth_header = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
 
-        let token = auth_header.token();
+        let jwt_secret = state.config.jwt_secret.clone();
 
-        // Get JWT secret from state - for now we'll use the env var directly
-        // In production, this should come from app state
-        let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-in-production".to_string());
+        async move {
+            let auth_header = auth_header.ok_or(AppError::Unauthorized)?;
 
-        let claims = verify_token(token, &secret)?;
+            // Extract the bearer token
+            let token = auth_header
+                .strip_prefix("Bearer ")
+                .ok_or(AppError::Unauthorized)?;
 
-        Ok(AuthUser {
-            user_id: claims.sub,
-            username: claims.username,
-        })
+            // Verify the token using the JWT secret from config
+            let claims = verify_token(token, &jwt_secret)
+                .map_err(|_| AppError::Unauthorized)?;
+
+            Ok(AuthUser {
+                user_id: claims.sub,
+                username: claims.username,
+            })
+        }
     }
 }
 

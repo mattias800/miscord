@@ -13,6 +13,9 @@ mod ws;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -29,6 +32,8 @@ async fn main() -> Result<()> {
 
     // Initialize database
     let db_pool = db::init_pool(&config.database_url).await?;
+
+    // Run migrations
     db::run_migrations(&db_pool).await?;
 
     // Create application state

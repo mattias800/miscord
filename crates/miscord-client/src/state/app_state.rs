@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -10,7 +11,7 @@ pub struct AppState {
     inner: Arc<RwLock<AppStateInner>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppStateInner {
     // Current user
     pub current_user: Option<UserData>,
@@ -30,6 +31,9 @@ pub struct AppStateInner {
     // Users
     pub users: HashMap<Uuid, UserData>,
 
+    // Typing indicators (channel_id -> (user_id -> started_at))
+    pub typing_users: HashMap<Uuid, HashMap<Uuid, Instant>>,
+
     // Voice state
     pub voice_channel_id: Option<Uuid>,
     pub voice_participants: HashMap<Uuid, VoiceParticipant>,
@@ -38,9 +42,53 @@ pub struct AppStateInner {
     pub is_video_enabled: bool,
     pub is_screen_sharing: bool,
 
+    // WebRTC signaling
+    pub pending_rtc_offers: Vec<RtcSignal>,
+    pub pending_rtc_answers: Vec<RtcSignal>,
+    pub pending_ice_candidates: Vec<IceCandidate>,
+
     // Connection state
     pub is_connected: bool,
     pub connection_error: Option<String>,
+}
+
+impl Default for AppStateInner {
+    fn default() -> Self {
+        Self {
+            current_user: None,
+            auth_token: None,
+            servers: HashMap::new(),
+            current_server_id: None,
+            channels: HashMap::new(),
+            current_channel_id: None,
+            messages: HashMap::new(),
+            users: HashMap::new(),
+            typing_users: HashMap::new(),
+            voice_channel_id: None,
+            voice_participants: HashMap::new(),
+            is_muted: false,
+            is_deafened: false,
+            is_video_enabled: false,
+            is_screen_sharing: false,
+            pending_rtc_offers: Vec::new(),
+            pending_rtc_answers: Vec::new(),
+            pending_ice_candidates: Vec::new(),
+            is_connected: false,
+            connection_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RtcSignal {
+    pub from_user_id: Uuid,
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IceCandidate {
+    pub from_user_id: Uuid,
+    pub candidate: String,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +182,75 @@ impl AppState {
         state.is_deafened = false;
         state.is_video_enabled = false;
         state.is_screen_sharing = false;
+    }
+
+    // Typing indicator methods
+    pub async fn set_user_typing(&self, channel_id: Uuid, user_id: Uuid) {
+        let mut state = self.inner.write().await;
+        state
+            .typing_users
+            .entry(channel_id)
+            .or_default()
+            .insert(user_id, Instant::now());
+    }
+
+    pub async fn clear_user_typing(&self, channel_id: Uuid, user_id: Uuid) {
+        let mut state = self.inner.write().await;
+        if let Some(users) = state.typing_users.get_mut(&channel_id) {
+            users.remove(&user_id);
+        }
+    }
+
+    pub async fn get_typing_users(&self, channel_id: Uuid) -> Vec<Uuid> {
+        let state = self.inner.read().await;
+        let now = Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+
+        state
+            .typing_users
+            .get(&channel_id)
+            .map(|users| {
+                users
+                    .iter()
+                    .filter(|(_, started_at)| now.duration_since(**started_at) < timeout)
+                    .map(|(user_id, _)| *user_id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // WebRTC signaling methods
+    pub async fn add_rtc_offer(&self, from_user_id: Uuid, sdp: String) {
+        let mut state = self.inner.write().await;
+        state.pending_rtc_offers.push(RtcSignal { from_user_id, sdp });
+    }
+
+    pub async fn add_rtc_answer(&self, from_user_id: Uuid, sdp: String) {
+        let mut state = self.inner.write().await;
+        state.pending_rtc_answers.push(RtcSignal { from_user_id, sdp });
+    }
+
+    pub async fn add_ice_candidate(&self, from_user_id: Uuid, candidate: String) {
+        let mut state = self.inner.write().await;
+        state.pending_ice_candidates.push(IceCandidate {
+            from_user_id,
+            candidate,
+        });
+    }
+
+    pub async fn take_pending_rtc_offers(&self) -> Vec<RtcSignal> {
+        let mut state = self.inner.write().await;
+        std::mem::take(&mut state.pending_rtc_offers)
+    }
+
+    pub async fn take_pending_rtc_answers(&self) -> Vec<RtcSignal> {
+        let mut state = self.inner.write().await;
+        std::mem::take(&mut state.pending_rtc_answers)
+    }
+
+    pub async fn take_pending_ice_candidates(&self) -> Vec<IceCandidate> {
+        let mut state = self.inner.write().await;
+        std::mem::take(&mut state.pending_ice_candidates)
     }
 }
 

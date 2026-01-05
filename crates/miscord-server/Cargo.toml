@@ -42,6 +42,8 @@ serde_json = { workspace = true }
 # Authentication
 argon2 = { workspace = true }
 jsonwebtoken = { workspace = true }
+async-trait = { workspace = true }
+dotenvy = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }

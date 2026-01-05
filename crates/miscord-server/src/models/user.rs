@@ -19,6 +19,7 @@ pub struct User {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, Default)]
+#[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "user_status", rename_all = "lowercase")]
 pub enum UserStatus {
     #[default]
