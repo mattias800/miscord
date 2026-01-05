@@ -1,11 +1,63 @@
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// Information about an audio device
+#[derive(Debug, Clone)]
+pub struct AudioDevice {
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// List all available input (microphone) devices
+pub fn list_input_devices() -> Result<Vec<AudioDevice>> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok());
+
+    let devices: Vec<AudioDevice> = host
+        .input_devices()?
+        .filter_map(|d| {
+            let name = d.name().ok()?;
+            Some(AudioDevice {
+                is_default: default_name.as_ref() == Some(&name),
+                name,
+            })
+        })
+        .collect();
+
+    Ok(devices)
+}
+
+/// List all available output (speaker) devices
+pub fn list_output_devices() -> Result<Vec<AudioDevice>> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_output_device()
+        .and_then(|d| d.name().ok());
+
+    let devices: Vec<AudioDevice> = host
+        .output_devices()?
+        .filter_map(|d| {
+            let name = d.name().ok()?;
+            Some(AudioDevice {
+                is_default: default_name.as_ref() == Some(&name),
+                name,
+            })
+        })
+        .collect();
+
+    Ok(devices)
+}
 
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
     is_capturing: bool,
+    /// Atomic storage for input level (RMS as f32 bits)
+    level: Arc<AtomicU32>,
 }
 
 impl AudioCapture {
@@ -13,6 +65,7 @@ impl AudioCapture {
         Self {
             stream: None,
             is_capturing: false,
+            level: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -23,6 +76,16 @@ impl AudioCapture {
             .filter_map(|d| d.name().ok())
             .collect();
         Ok(devices)
+    }
+
+    /// Get the current input level (0.0 to 1.0)
+    pub fn get_level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    /// Get a clone of the level Arc for external monitoring
+    pub fn level_monitor(&self) -> Arc<AtomicU32> {
+        self.level.clone()
     }
 
     pub fn start(&mut self, device_name: Option<&str>) -> Result<mpsc::Receiver<Vec<f32>>> {
@@ -48,10 +111,20 @@ impl AudioCapture {
         );
 
         let (tx, rx) = mpsc::channel(100);
+        let level = self.level.clone();
 
         let stream = device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                // Calculate RMS level
+                if !data.is_empty() {
+                    let sum: f32 = data.iter().map(|s| s * s).sum();
+                    let rms = (sum / data.len() as f32).sqrt();
+                    // Clamp to 0.0-1.0 range
+                    let clamped = rms.min(1.0);
+                    level.store(clamped.to_bits(), Ordering::Relaxed);
+                }
+
                 let samples = data.to_vec();
                 let _ = tx.try_send(samples);
             },
@@ -71,6 +144,7 @@ impl AudioCapture {
     pub fn stop(&mut self) {
         self.stream = None;
         self.is_capturing = false;
+        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 
     pub fn is_capturing(&self) -> bool {
@@ -93,11 +167,22 @@ impl AudioPlayback {
         Self { stream: None }
     }
 
-    pub fn start(&mut self, mut rx: mpsc::Receiver<Vec<f32>>) -> Result<()> {
+    /// Start playback on a specific device (or default if None)
+    pub fn start_with_device(
+        &mut self,
+        device_name: Option<&str>,
+        mut rx: mpsc::Receiver<Vec<f32>>,
+    ) -> Result<()> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| anyhow::anyhow!("No default output device"))?;
+
+        let device = if let Some(name) = device_name {
+            host.output_devices()?
+                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .ok_or_else(|| anyhow::anyhow!("Output device not found: {}", name))?
+        } else {
+            host.default_output_device()
+                .ok_or_else(|| anyhow::anyhow!("No default output device"))?
+        };
 
         let config = device.default_output_config()?;
 
@@ -140,6 +225,11 @@ impl AudioPlayback {
         self.stream = Some(stream);
 
         Ok(())
+    }
+
+    /// Start playback on default device (backwards compatibility)
+    pub fn start(&mut self, rx: mpsc::Receiver<Vec<f32>>) -> Result<()> {
+        self.start_with_device(None, rx)
     }
 
     pub fn stop(&mut self) {

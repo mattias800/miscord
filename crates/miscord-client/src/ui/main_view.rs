@@ -25,13 +25,16 @@ impl MainView {
         }
     }
 
+    /// Returns true if settings should be opened
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         state: &AppState,
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
-    ) {
+    ) -> bool {
+        let mut open_settings = false;
+
         // Left panel - Server list
         egui::SidePanel::left("server_panel")
             .exact_width(72.0)
@@ -47,6 +50,14 @@ impl MainView {
                 self.channel_list.show(ui, state, network, runtime);
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    // Settings button row
+                    ui.horizontal(|ui| {
+                        if ui.button("\u{2699}").on_hover_text("Settings").clicked() {
+                            open_settings = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+
                     self.voice_panel.show_controls(ui, state, network, runtime);
                 });
             });
@@ -67,6 +78,8 @@ impl MainView {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.chat_view.show(ui, state, network, runtime);
         });
+
+        open_settings
     }
 }
 

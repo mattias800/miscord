@@ -50,6 +50,13 @@ pub struct AppStateInner {
     // Connection state
     pub is_connected: bool,
     pub connection_error: Option<String>,
+
+    // Audio settings
+    pub selected_input_device: Option<String>,
+    pub selected_output_device: Option<String>,
+    pub input_volume: f32,
+    pub output_volume: f32,
+    pub loopback_enabled: bool,
 }
 
 impl Default for AppStateInner {
@@ -75,6 +82,11 @@ impl Default for AppStateInner {
             pending_ice_candidates: Vec::new(),
             is_connected: false,
             connection_error: None,
+            selected_input_device: None,
+            selected_output_device: None,
+            input_volume: 1.0,
+            output_volume: 1.0,
+            loopback_enabled: false,
         }
     }
 }

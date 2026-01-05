@@ -5,6 +5,7 @@ use crate::state::AppState;
 
 use super::login::LoginView;
 use super::main_view::MainView;
+use super::settings::SettingsView;
 
 pub struct MiscordApp {
     state: AppState,
@@ -13,11 +14,14 @@ pub struct MiscordApp {
     view: View,
     login_view: LoginView,
     main_view: MainView,
+    settings_view: SettingsView,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Login,
     Main,
+    Settings,
 }
 
 impl MiscordApp {
@@ -42,7 +46,18 @@ impl MiscordApp {
             view: View::Login,
             login_view: LoginView::new(),
             main_view: MainView::new(),
+            settings_view: SettingsView::new(),
         }
+    }
+
+    /// Open settings view
+    pub fn open_settings(&mut self) {
+        self.view = View::Settings;
+    }
+
+    /// Close settings and return to main view
+    pub fn close_settings(&mut self) {
+        self.view = View::Main;
     }
 
     fn check_auth_state(&mut self) {
@@ -94,12 +109,21 @@ impl eframe::App for MiscordApp {
                 }
             }
             View::Main => {
-                self.main_view.show(
+                let open_settings = self.main_view.show(
                     ctx,
                     &self.state,
                     &self.network,
                     &self.runtime,
                 );
+                if open_settings {
+                    self.view = View::Settings;
+                }
+            }
+            View::Settings => {
+                let close = self.settings_view.show(ctx, &self.state, &self.runtime);
+                if close {
+                    self.view = View::Main;
+                }
             }
         }
     }
