@@ -61,6 +61,7 @@ pub struct MessageData {
     pub id: Uuid,
     pub channel_id: Uuid,
     pub author_id: Uuid,
+    pub author_name: String,
     pub content: String,
     pub edited_at: Option<DateTime<Utc>>,
     pub reply_to_id: Option<Uuid>,

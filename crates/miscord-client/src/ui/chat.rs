@@ -61,21 +61,10 @@ impl ChatView {
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     for message in messages.iter() {
-                        // Get author name
-                        let author_name = runtime.block_on(async {
-                            state
-                                .read()
-                                .await
-                                .users
-                                .get(&message.author_id)
-                                .map(|u| u.display_name.clone())
-                                .unwrap_or_else(|| "Unknown".to_string())
-                        });
-
                         // Message header: author name and timestamp
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(&author_name)
+                                egui::RichText::new(&message.author_name)
                                     .strong()
                                     .color(egui::Color32::from_rgb(88, 101, 242)),
                             );

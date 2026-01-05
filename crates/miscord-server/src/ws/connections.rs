@@ -1,13 +1,7 @@
-use futures_util::stream::SplitSink;
-use futures_util::SinkExt;
 use miscord_protocol::ServerMessage;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
-
-type WsSender = SplitSink<WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>, Message>;
 
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
@@ -16,8 +10,8 @@ pub struct ConnectionInfo {
 }
 
 pub struct ConnectionManager {
-    /// Map from connection ID to WebSocket sender
-    connections: RwLock<HashMap<Uuid, Arc<RwLock<WsSender>>>>,
+    /// Map from connection ID to message sender channel
+    senders: RwLock<HashMap<Uuid, mpsc::UnboundedSender<String>>>,
     /// Map from connection ID to connection info
     connection_info: RwLock<HashMap<Uuid, ConnectionInfo>>,
     /// Map from user ID to connection IDs (a user may have multiple connections)
@@ -29,7 +23,7 @@ pub struct ConnectionManager {
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
-            connections: RwLock::new(HashMap::new()),
+            senders: RwLock::new(HashMap::new()),
             connection_info: RwLock::new(HashMap::new()),
             user_connections: RwLock::new(HashMap::new()),
             channel_subscribers: RwLock::new(HashMap::new()),
@@ -40,14 +34,9 @@ impl ConnectionManager {
         &self,
         connection_id: Uuid,
         user_id: Uuid,
-        sender: WsSender,
+        sender: mpsc::UnboundedSender<String>,
     ) {
-        let sender = Arc::new(RwLock::new(sender));
-
-        self.connections
-            .write()
-            .await
-            .insert(connection_id, sender);
+        self.senders.write().await.insert(connection_id, sender);
 
         self.connection_info.write().await.insert(
             connection_id,
@@ -64,7 +53,7 @@ impl ConnectionManager {
             .or_default()
             .insert(connection_id);
 
-        tracing::info!(
+        tracing::debug!(
             "User {} connected with connection ID {}",
             user_id,
             connection_id
@@ -88,14 +77,14 @@ impl ConnectionManager {
                 }
             }
 
-            tracing::info!(
+            tracing::debug!(
                 "User {} disconnected (connection ID {})",
                 info.user_id,
                 connection_id
             );
         }
 
-        self.connections.write().await.remove(&connection_id);
+        self.senders.write().await.remove(&connection_id);
     }
 
     pub async fn subscribe_to_channel(&self, connection_id: Uuid, channel_id: Uuid) {
@@ -109,6 +98,8 @@ impl ConnectionManager {
             .entry(channel_id)
             .or_default()
             .insert(connection_id);
+
+        tracing::debug!("Connection {} subscribed to channel {}", connection_id, channel_id);
     }
 
     pub async fn unsubscribe_from_channel(&self, connection_id: Uuid, channel_id: Uuid) {
@@ -131,17 +122,19 @@ impl ConnectionManager {
         };
 
         let subscribers = self.channel_subscribers.read().await;
-        let connections = self.connections.read().await;
+        let senders = self.senders.read().await;
 
         if let Some(subs) = subscribers.get(&channel_id) {
+            tracing::debug!("Broadcasting to {} subscribers of channel {}", subs.len(), channel_id);
             for conn_id in subs {
-                if let Some(sender) = connections.get(conn_id) {
-                    let mut sender = sender.write().await;
-                    if let Err(e) = sender.send(Message::Text(json.clone().into())).await {
+                if let Some(sender) = senders.get(conn_id) {
+                    if let Err(e) = sender.send(json.clone()) {
                         tracing::error!("Failed to send message to {}: {}", conn_id, e);
                     }
                 }
             }
+        } else {
+            tracing::debug!("No subscribers for channel {}", channel_id);
         }
     }
 
@@ -155,13 +148,12 @@ impl ConnectionManager {
         };
 
         let user_connections = self.user_connections.read().await;
-        let connections = self.connections.read().await;
+        let senders = self.senders.read().await;
 
         if let Some(conn_ids) = user_connections.get(&user_id) {
             for conn_id in conn_ids {
-                if let Some(sender) = connections.get(conn_id) {
-                    let mut sender = sender.write().await;
-                    if let Err(e) = sender.send(Message::Text(json.clone().into())).await {
+                if let Some(sender) = senders.get(conn_id) {
+                    if let Err(e) = sender.send(json.clone()) {
                         tracing::error!("Failed to send message to user {} ({}): {}", user_id, conn_id, e);
                     }
                 }
@@ -178,11 +170,10 @@ impl ConnectionManager {
             }
         };
 
-        let connections = self.connections.read().await;
+        let senders = self.senders.read().await;
 
-        if let Some(sender) = connections.get(&connection_id) {
-            let mut sender = sender.write().await;
-            if let Err(e) = sender.send(Message::Text(json.clone().into())).await {
+        if let Some(sender) = senders.get(&connection_id) {
+            if let Err(e) = sender.send(json) {
                 tracing::error!("Failed to send message to {}: {}", connection_id, e);
             }
         }

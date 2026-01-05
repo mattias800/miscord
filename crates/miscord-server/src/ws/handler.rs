@@ -9,6 +9,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use miscord_protocol::{ClientMessage, ServerMessage};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub async fn ws_handler(
@@ -90,12 +91,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         return;
     }
 
-    // Register connection
-    // Note: This is a simplified version - in production you'd need to handle
-    // the split sender/receiver with the connection manager differently
-    // For now, we'll handle messages in a loop and broadcast via a separate mechanism
-
     tracing::info!("User {} authenticated on WebSocket", user_id);
+
+    // Create channel for outbound messages
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    // Register connection with the connection manager
+    state.connections.add_connection(connection_id, user_id, tx).await;
 
     // Update user status to online
     if let Err(e) = state
@@ -105,6 +107,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     {
         tracing::error!("Failed to update user status: {}", e);
     }
+
+    // Spawn task to forward messages from channel to WebSocket
+    let send_task = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    });
 
     // Handle incoming messages
     while let Some(msg) = receiver.next().await {
@@ -118,12 +129,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 };
 
-                handle_client_message(&state, user_id, connection_id, client_msg, &mut sender).await;
+                handle_client_message(&state, user_id, connection_id, client_msg).await;
             }
             Ok(Message::Ping(data)) => {
-                if sender.send(Message::Pong(data)).await.is_err() {
-                    break;
-                }
+                // Send pong via connection manager
+                state.connections.send_to_connection(
+                    connection_id,
+                    &ServerMessage::Pong,
+                ).await;
+                let _ = data; // Suppress warning
             }
             Ok(Message::Close(_)) => break,
             Err(e) => {
@@ -136,6 +150,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Cleanup on disconnect
     state.connections.remove_connection(connection_id).await;
+
+    // Abort the send task
+    send_task.abort();
 
     // Update user status to offline (if no other connections)
     if !state.connections.is_user_online(user_id).await {
@@ -161,7 +178,6 @@ async fn handle_client_message(
     user_id: Uuid,
     connection_id: Uuid,
     message: ClientMessage,
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) {
     match message {
         ClientMessage::Authenticate { .. } => {
@@ -173,10 +189,10 @@ async fn handle_client_message(
                 .subscribe_to_channel(connection_id, channel_id)
                 .await;
 
-            let response = ServerMessage::ChannelSubscribed { channel_id };
-            let _ = sender
-                .send(Message::Text(serde_json::to_string(&response).unwrap().into()))
-                .await;
+            state.connections.send_to_connection(
+                connection_id,
+                &ServerMessage::ChannelSubscribed { channel_id },
+            ).await;
         }
         ClientMessage::UnsubscribeChannel { channel_id } => {
             state
@@ -185,11 +201,10 @@ async fn handle_client_message(
                 .await;
         }
         ClientMessage::Ping => {
-            let _ = sender
-                .send(Message::Text(
-                    serde_json::to_string(&ServerMessage::Pong).unwrap().into(),
-                ))
-                .await;
+            state.connections.send_to_connection(
+                connection_id,
+                &ServerMessage::Pong,
+            ).await;
         }
         ClientMessage::StartTyping { channel_id } => {
             state

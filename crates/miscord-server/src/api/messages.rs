@@ -1,11 +1,12 @@
 use crate::auth::AuthUser;
 use crate::error::Result;
-use crate::models::{CreateMessage, Message, UpdateMessage};
+use crate::models::{CreateMessage, UpdateMessage};
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
     Json,
 };
+use miscord_protocol::MessageData;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -20,13 +21,36 @@ pub async fn list_messages(
     _auth: AuthUser,
     Path(channel_id): Path<Uuid>,
     Query(query): Query<ListMessagesQuery>,
-) -> Result<Json<Vec<Message>>> {
+) -> Result<Json<Vec<MessageData>>> {
     let limit = query.limit.unwrap_or(50).min(100);
     let messages = state
         .message_service
         .list_by_channel(channel_id, query.before, limit)
         .await?;
-    Ok(Json(messages))
+
+    // Convert to MessageData with author names
+    let mut result = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let author_name = state
+            .user_service
+            .get_by_id(msg.author_id)
+            .await
+            .map(|u| u.display_name)
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        result.push(MessageData {
+            id: msg.id,
+            channel_id: msg.channel_id,
+            author_id: msg.author_id,
+            author_name,
+            content: msg.content,
+            edited_at: msg.edited_at,
+            reply_to_id: msg.reply_to_id,
+            created_at: msg.created_at,
+        });
+    }
+
+    Ok(Json(result))
 }
 
 pub async fn create_message(
@@ -34,29 +58,40 @@ pub async fn create_message(
     auth: AuthUser,
     Path(channel_id): Path<Uuid>,
     Json(input): Json<CreateMessage>,
-) -> Result<Json<Message>> {
+) -> Result<Json<MessageData>> {
     let message = state
         .message_service
         .create(channel_id, auth.user_id, input)
         .await?;
 
+    // Get author name for the broadcast
+    let author_name = state
+        .user_service
+        .get_by_id(auth.user_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let message_data = MessageData {
+        id: message.id,
+        channel_id: message.channel_id,
+        author_id: message.author_id,
+        author_name,
+        content: message.content,
+        edited_at: message.edited_at,
+        reply_to_id: message.reply_to_id,
+        created_at: message.created_at,
+    };
+
     // Broadcast to channel subscribers
     state.connections.broadcast_to_channel(
         channel_id,
         &miscord_protocol::ServerMessage::MessageCreated {
-            message: miscord_protocol::MessageData {
-                id: message.id,
-                channel_id: message.channel_id,
-                author_id: message.author_id,
-                content: message.content.clone(),
-                edited_at: message.edited_at,
-                reply_to_id: message.reply_to_id,
-                created_at: message.created_at,
-            },
+            message: message_data.clone(),
         },
     ).await;
 
-    Ok(Json(message))
+    Ok(Json(message_data))
 }
 
 pub async fn update_message(
@@ -64,29 +99,40 @@ pub async fn update_message(
     auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateMessage>,
-) -> Result<Json<Message>> {
+) -> Result<Json<MessageData>> {
     let message = state
         .message_service
         .update(id, auth.user_id, input)
         .await?;
 
+    // Get author name for the broadcast
+    let author_name = state
+        .user_service
+        .get_by_id(message.author_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let message_data = MessageData {
+        id: message.id,
+        channel_id: message.channel_id,
+        author_id: message.author_id,
+        author_name,
+        content: message.content,
+        edited_at: message.edited_at,
+        reply_to_id: message.reply_to_id,
+        created_at: message.created_at,
+    };
+
     // Broadcast update
     state.connections.broadcast_to_channel(
         message.channel_id,
         &miscord_protocol::ServerMessage::MessageUpdated {
-            message: miscord_protocol::MessageData {
-                id: message.id,
-                channel_id: message.channel_id,
-                author_id: message.author_id,
-                content: message.content.clone(),
-                edited_at: message.edited_at,
-                reply_to_id: message.reply_to_id,
-                created_at: message.created_at,
-            },
+            message: message_data.clone(),
         },
     ).await;
 
-    Ok(Json(message))
+    Ok(Json(message_data))
 }
 
 pub async fn delete_message(
