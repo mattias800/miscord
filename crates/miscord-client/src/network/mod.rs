@@ -130,6 +130,25 @@ impl NetworkClient {
         .await
     }
 
+    pub async fn create_invite(&self, community_id: Uuid) -> Result<String> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        #[derive(serde::Deserialize)]
+        struct InviteResponse {
+            code: String,
+        }
+
+        let response: InviteResponse = api::post(
+            &format!("{}/api/communities/{}/invites", server_url, community_id),
+            &(),
+            token.as_deref(),
+        )
+        .await?;
+
+        Ok(response.code)
+    }
+
     // Channels
 
     pub async fn get_channels(&self, community_id: Uuid) -> Result<Vec<ChannelData>> {

@@ -8,6 +8,9 @@ pub struct ChannelList {
     show_create_dialog: bool,
     new_channel_name: String,
     new_channel_type: ChannelType,
+    show_invite_dialog: bool,
+    invite_code: Option<String>,
+    invite_loading: bool,
 }
 
 impl ChannelList {
@@ -16,6 +19,9 @@ impl ChannelList {
             show_create_dialog: false,
             new_channel_name: String::new(),
             new_channel_type: ChannelType::Text,
+            show_invite_dialog: false,
+            invite_code: None,
+            invite_loading: false,
         }
     }
 
@@ -65,6 +71,26 @@ impl ChannelList {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("+").on_hover_text("Create Channel").clicked() {
                         self.show_create_dialog = true;
+                    }
+                    if ui.button("Invite").on_hover_text("Create Invite Link").clicked() {
+                        self.show_invite_dialog = true;
+                        self.invite_code = None;
+                        self.invite_loading = true;
+
+                        let network = network.clone();
+                        let state = state.clone();
+
+                        runtime.spawn(async move {
+                            match network.create_invite(community_id).await {
+                                Ok(code) => {
+                                    let mut s = state.write().await;
+                                    s.pending_invite_code = Some(code);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to create invite: {}", e);
+                                }
+                            }
+                        });
                     }
                 });
             });
@@ -197,6 +223,50 @@ impl ChannelList {
                             self.show_create_dialog = false;
                         }
                     });
+                });
+        }
+
+        // Invite dialog
+        if self.show_invite_dialog {
+            // Check if invite code is ready
+            let pending_code = runtime.block_on(async {
+                let mut s = state.write().await;
+                s.pending_invite_code.take()
+            });
+
+            if let Some(code) = pending_code {
+                self.invite_code = Some(code);
+                self.invite_loading = false;
+            }
+
+            egui::Window::new("Invite People")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    if self.invite_loading {
+                        ui.label("Creating invite code...");
+                        ui.spinner();
+                    } else if let Some(code) = &self.invite_code {
+                        ui.label("Share this invite code:");
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            ui.monospace(code);
+                            if ui.button("Copy").clicked() {
+                                ui.output_mut(|o| o.copied_text = code.clone());
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                    } else {
+                        ui.label("Failed to create invite code");
+                    }
+
+                    if ui.button("Close").clicked() {
+                        self.show_invite_dialog = false;
+                        self.invite_code = None;
+                        self.invite_loading = false;
+                    }
                 });
         }
     }

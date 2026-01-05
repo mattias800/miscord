@@ -62,6 +62,9 @@ pub struct AppStateInner {
     pub loopback_enabled: bool,
     pub gate_threshold_db: f32, // -60 to 0 dB, audio below this is muted
     pub gate_enabled: bool,
+
+    // UI state for pending invite code
+    pub pending_invite_code: Option<String>,
 }
 
 impl Default for AppStateInner {
@@ -95,6 +98,7 @@ impl Default for AppStateInner {
             loopback_enabled: false,
             gate_threshold_db: -40.0, // -40 dB default threshold
             gate_enabled: true,
+            pending_invite_code: None,
         }
     }
 }
