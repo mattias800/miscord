@@ -61,41 +61,39 @@ impl ChatView {
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     for message in messages.iter() {
-                        ui.horizontal(|ui| {
-                            // Get author name
-                            let author_name = runtime.block_on(async {
-                                state
-                                    .read()
-                                    .await
-                                    .users
-                                    .get(&message.author_id)
-                                    .map(|u| u.display_name.clone())
-                                    .unwrap_or_else(|| "Unknown".to_string())
-                            });
+                        // Get author name
+                        let author_name = runtime.block_on(async {
+                            state
+                                .read()
+                                .await
+                                .users
+                                .get(&message.author_id)
+                                .map(|u| u.display_name.clone())
+                                .unwrap_or_else(|| "Unknown".to_string())
+                        });
 
+                        // Message header: author name and timestamp
+                        ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(&author_name)
                                     .strong()
                                     .color(egui::Color32::from_rgb(88, 101, 242)),
                             );
 
-                            ui.label(&message.content);
-
-                            // Timestamp
                             let time = message.created_at.format("%H:%M").to_string();
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(time)
-                                            .small()
-                                            .color(egui::Color32::GRAY),
-                                    );
-                                },
+                            ui.label(
+                                egui::RichText::new(time)
+                                    .small()
+                                    .color(egui::Color32::GRAY),
                             );
                         });
 
-                        ui.add_space(4.0);
+                        // Message content with markdown rendering
+                        ui.indent("msg_content", |ui| {
+                            super::markdown::render_markdown(ui, &message.content);
+                        });
+
+                        ui.add_space(8.0);
                     }
                 });
 
@@ -104,14 +102,25 @@ impl ChatView {
             // Message input
             ui.horizontal(|ui| {
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.message_input)
-                        .hint_text(format!("Message #{}", channel_name))
-                        .desired_width(ui.available_width() - 60.0),
+                    egui::TextEdit::multiline(&mut self.message_input)
+                        .hint_text(format!("Message #{} (Shift+Enter for new line)", channel_name))
+                        .desired_width(ui.available_width() - 60.0)
+                        .desired_rows(2)
+                        .lock_focus(true),
                 );
 
-                // Send on Enter
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.send_message(channel_id, state, network, runtime);
+                // Handle Enter (send) vs Shift+Enter (new line)
+                if response.has_focus() {
+                    let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let shift_held = ui.input(|i| i.modifiers.shift);
+
+                    if enter_pressed && !shift_held {
+                        // Remove the newline that was just inserted
+                        if self.message_input.ends_with('\n') {
+                            self.message_input.pop();
+                        }
+                        self.send_message(channel_id, state, network, runtime);
+                    }
                 }
 
                 if ui.button("Send").clicked() {

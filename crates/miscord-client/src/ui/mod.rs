@@ -5,5 +5,6 @@ mod chat;
 mod server_list;
 mod channel_list;
 mod voice;
+mod markdown;
 
 pub use app::MiscordApp;
