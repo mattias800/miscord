@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "miscord_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "miscord-server"
 path = "src/main.rs"
@@ -57,3 +61,4 @@ rand = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+reqwest = { version = "0.12", features = ["json"] }

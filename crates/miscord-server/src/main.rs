@@ -1,15 +1,6 @@
 use anyhow::Result;
+use miscord_server::state;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-mod api;
-mod auth;
-mod db;
-mod error;
-mod models;
-mod services;
-mod state;
-mod webrtc;
-mod ws;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,22 +20,14 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = state::Config::load()?;
+    let bind_address = config.bind_address.clone();
 
-    // Initialize database
-    let db_pool = db::init_pool(&config.database_url).await?;
-
-    // Run migrations
-    db::run_migrations(&db_pool).await?;
-
-    // Create application state
-    let state = state::AppState::new(config.clone(), db_pool);
-
-    // Build the router
-    let app = api::create_router(state);
+    // Create application
+    let (app, _db_pool) = miscord_server::create_app(config).await?;
 
     // Start the server
-    let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
-    tracing::info!("Listening on {}", config.bind_address);
+    let listener = tokio::net::TcpListener::bind(&bind_address).await?;
+    tracing::info!("Listening on {}", bind_address);
 
     axum::serve(listener, app).await?;
 
