@@ -1,6 +1,6 @@
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -102,7 +102,7 @@ impl AudioCapture {
 
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate().0;
-        let channels = config.channels();
+        let channels = config.channels() as usize;
 
         tracing::info!(
             "Starting audio capture: {} Hz, {} channels",
@@ -125,8 +125,16 @@ impl AudioCapture {
                     level.store(clamped.to_bits(), Ordering::Relaxed);
                 }
 
-                let samples = data.to_vec();
-                let _ = tx.try_send(samples);
+                // Convert to mono by averaging all channels
+                let mono_samples: Vec<f32> = if channels > 1 {
+                    data.chunks(channels)
+                        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+                        .collect()
+                } else {
+                    data.to_vec()
+                };
+
+                let _ = tx.try_send(mono_samples);
             },
             |err| {
                 tracing::error!("Audio capture error: {}", err);
@@ -160,11 +168,15 @@ impl Default for AudioCapture {
 
 pub struct AudioPlayback {
     stream: Option<cpal::Stream>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl AudioPlayback {
     pub fn new() -> Self {
-        Self { stream: None }
+        Self {
+            stream: None,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Start playback on a specific device (or default if None)
@@ -185,15 +197,42 @@ impl AudioPlayback {
         };
 
         let config = device.default_output_config()?;
+        let output_channels = config.channels() as usize;
 
-        let sample_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        tracing::info!(
+            "Starting audio playback: {} Hz, {} channels",
+            config.sample_rate().0,
+            output_channels
+        );
+
+        let sample_buffer = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
         let buffer_clone = sample_buffer.clone();
 
-        // Spawn thread to receive samples (using std::thread to avoid Tokio runtime requirement)
+        // Reset stop flag
+        self.stop_flag.store(false, Ordering::SeqCst);
+        let stop_flag = self.stop_flag.clone();
+
+        // Spawn thread to receive mono samples and expand to output channels
         std::thread::spawn(move || {
-            while let Some(samples) = rx.blocking_recv() {
-                let mut buffer = buffer_clone.lock().unwrap();
-                buffer.extend(samples);
+            while !stop_flag.load(Ordering::SeqCst) {
+                // Use a timeout to periodically check stop flag
+                match rx.blocking_recv() {
+                    Some(mono_samples) => {
+                        // Expand mono to output channels (duplicate sample to all channels)
+                        let expanded: Vec<f32> = mono_samples
+                            .iter()
+                            .flat_map(|&sample| std::iter::repeat(sample).take(output_channels))
+                            .collect();
+
+                        let mut buffer = buffer_clone.lock().unwrap();
+                        // Limit buffer size to prevent memory growth
+                        const MAX_BUFFER_SIZE: usize = 48000 * 2; // ~1 second at 48kHz stereo
+                        if buffer.len() < MAX_BUFFER_SIZE {
+                            buffer.extend(expanded);
+                        }
+                    }
+                    None => break, // Channel closed
+                }
             }
         });
 
@@ -233,6 +272,9 @@ impl AudioPlayback {
     }
 
     pub fn stop(&mut self) {
+        // Signal the receiver thread to stop
+        self.stop_flag.store(true, Ordering::SeqCst);
+        // Drop the stream to stop playback
         self.stream = None;
     }
 }
