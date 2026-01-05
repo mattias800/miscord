@@ -34,8 +34,10 @@ static RE_CODE_BLOCK: LazyLock<Regex> =
 static RE_INLINE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*|__(.+?)__").unwrap());
+// Note: We use a simple pattern here because bold (**) is processed first
+// and overlapping matches are filtered out, so we don't need look-around assertions
 static RE_ITALIC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?<!\*)\*([^*]+)\*(?!\*)|(?<!_)_([^_]+)_(?!_)").unwrap());
+    LazyLock::new(|| Regex::new(r"\*([^*]+)\*|_([^_]+)_").unwrap());
 static RE_HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,3})\s+(.+)$").unwrap());
 static RE_LIST_ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\-\*]\s+(.+)$").unwrap());
 
