@@ -6,4 +6,4 @@ pub mod video;
 pub use audio::AudioCapture;
 pub use capture::CaptureDevice;
 // pub use screen::ScreenCapture;
-pub use video::VideoCapture;
+pub use video::{VideoCapture, VideoDeviceInfo, VideoFrame};

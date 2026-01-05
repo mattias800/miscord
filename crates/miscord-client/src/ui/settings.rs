@@ -2,12 +2,13 @@
 //!
 //! Provides settings management with sections for audio, video, etc.
 
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOptions, Ui};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::media::audio::{list_input_devices, list_output_devices, AudioCapture, AudioPlayback, linear_to_db};
+use crate::media::video::{VideoCapture, VideoDeviceInfo};
 use crate::state::AppState;
 
 /// The settings view component
@@ -17,11 +18,16 @@ pub struct SettingsView {
     audio_capture: Option<AudioCapture>,
     audio_playback: Option<AudioPlayback>,
     audio_rx: Option<mpsc::Receiver<Vec<f32>>>,
-    is_testing: bool,
+    is_testing_audio: bool,
     input_level: Arc<AtomicU32>,
     // Cached device lists
     input_devices: Vec<String>,
     output_devices: Vec<String>,
+    // Video test state
+    video_capture: Option<VideoCapture>,
+    is_testing_video: bool,
+    video_texture: Option<TextureHandle>,
+    video_devices: Vec<VideoDeviceInfo>,
     // Error message
     error_message: Option<String>,
 }
@@ -29,8 +35,8 @@ pub struct SettingsView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
     Audio,
+    Video,
     // Future sections
-    // Video,
     // Appearance,
     // Notifications,
 }
@@ -42,16 +48,20 @@ impl SettingsView {
             audio_capture: None,
             audio_playback: None,
             audio_rx: None,
-            is_testing: false,
+            is_testing_audio: false,
             input_level: Arc::new(AtomicU32::new(0)),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
+            video_capture: None,
+            is_testing_video: false,
+            video_texture: None,
+            video_devices: Vec::new(),
             error_message: None,
         }
     }
 
-    /// Refresh the device lists
-    fn refresh_devices(&mut self) {
+    /// Refresh the audio device lists
+    fn refresh_audio_devices(&mut self) {
         self.input_devices = list_input_devices()
             .map(|devices| {
                 devices
@@ -83,8 +93,13 @@ impl SettingsView {
             .unwrap_or_default();
     }
 
+    /// Refresh the video device list
+    fn refresh_video_devices(&mut self) {
+        self.video_devices = VideoCapture::list_devices().unwrap_or_default();
+    }
+
     /// Start audio test (capture and optionally playback)
-    fn start_test(&mut self, state: &AppState, runtime: &tokio::runtime::Runtime) {
+    fn start_audio_test(&mut self, state: &AppState, runtime: &tokio::runtime::Runtime) {
         self.error_message = None;
 
         // Get selected device and audio settings from state
@@ -138,7 +153,7 @@ impl SettingsView {
                 }
 
                 self.audio_capture = Some(capture);
-                self.is_testing = true;
+                self.is_testing_audio = true;
             }
             Err(e) => {
                 self.error_message = Some(format!("Capture error: {}", e));
@@ -147,7 +162,7 @@ impl SettingsView {
     }
 
     /// Stop audio test
-    fn stop_test(&mut self) {
+    fn stop_audio_test(&mut self) {
         if let Some(mut capture) = self.audio_capture.take() {
             capture.stop();
         }
@@ -155,8 +170,39 @@ impl SettingsView {
             playback.stop();
         }
         self.audio_rx = None;
-        self.is_testing = false;
+        self.is_testing_audio = false;
         self.input_level = Arc::new(AtomicU32::new(0));
+    }
+
+    /// Start video test
+    fn start_video_test(&mut self, state: &AppState, runtime: &tokio::runtime::Runtime) {
+        self.error_message = None;
+
+        // Get selected device from state
+        let device_index = runtime.block_on(async {
+            state.read().await.selected_video_device
+        });
+
+        let mut capture = VideoCapture::new();
+
+        match capture.start(device_index) {
+            Ok(_rx) => {
+                self.video_capture = Some(capture);
+                self.is_testing_video = true;
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Video capture error: {}", e));
+            }
+        }
+    }
+
+    /// Stop video test
+    fn stop_video_test(&mut self) {
+        if let Some(mut capture) = self.video_capture.take() {
+            capture.stop();
+        }
+        self.is_testing_video = false;
+        self.video_texture = None;
     }
 
     /// Render the settings view
@@ -171,12 +217,41 @@ impl SettingsView {
 
         // Refresh devices on first frame or periodically
         if self.input_devices.is_empty() {
-            self.refresh_devices();
+            self.refresh_audio_devices();
+        }
+        if self.video_devices.is_empty() {
+            self.refresh_video_devices();
         }
 
         // Drain audio samples if not in loopback mode (to keep level meter working)
         if let Some(rx) = &mut self.audio_rx {
             while rx.try_recv().is_ok() {}
+        }
+
+        // Capture video frame if testing
+        if self.is_testing_video {
+            if let Some(capture) = &mut self.video_capture {
+                if let Ok(Some(frame)) = futures::executor::block_on(capture.capture_frame()) {
+                    // Convert RGB to ColorImage
+                    let image = ColorImage::from_rgb(
+                        [frame.width as usize, frame.height as usize],
+                        &frame.data,
+                    );
+
+                    // Update texture
+                    if let Some(texture) = &mut self.video_texture {
+                        texture.set(image, TextureOptions::default());
+                    } else {
+                        self.video_texture = Some(ctx.load_texture(
+                            "video_preview",
+                            image,
+                            TextureOptions::default(),
+                        ));
+                    }
+                }
+            }
+            // Request repaint for continuous video updates
+            ctx.request_repaint();
         }
 
         // Full screen settings panel
@@ -217,8 +292,22 @@ impl SettingsView {
                         self.current_section = SettingsSection::Audio;
                     }
 
+                    // Video section
+                    let video_selected = self.current_section == SettingsSection::Video;
+                    let video_text = if video_selected {
+                        RichText::new("Video").strong()
+                    } else {
+                        RichText::new("Video")
+                    };
+
+                    if ui
+                        .selectable_label(video_selected, video_text)
+                        .clicked()
+                    {
+                        self.current_section = SettingsSection::Video;
+                    }
+
                     // Future sections can be added here
-                    // ui.selectable_label(false, "Video");
                     // ui.selectable_label(false, "Appearance");
                 });
 
@@ -232,14 +321,18 @@ impl SettingsView {
                         SettingsSection::Audio => {
                             self.show_audio_settings(ui, state, runtime);
                         }
+                        SettingsSection::Video => {
+                            self.show_video_settings(ui, state, runtime);
+                        }
                     }
                 });
             });
         });
 
-        // Stop test if closing
+        // Stop tests if closing
         if close_requested {
-            self.stop_test();
+            self.stop_audio_test();
+            self.stop_video_test();
         }
 
         close_requested
@@ -275,7 +368,7 @@ impl SettingsView {
         // Clone device lists to avoid borrow conflicts
         let input_devices = self.input_devices.clone();
         let output_devices = self.output_devices.clone();
-        let is_testing = self.is_testing;
+        let is_testing = self.is_testing_audio;
 
         // Input Device
         ui.label(RichText::new("Input Device").strong());
@@ -536,22 +629,22 @@ impl SettingsView {
 
         // Test Button
         ui.horizontal(|ui| {
-            let button_text = if self.is_testing {
+            let button_text = if self.is_testing_audio {
                 "Stop Test"
             } else {
                 "Test Audio"
             };
 
             if ui.button(button_text).clicked() {
-                if self.is_testing {
-                    self.stop_test();
+                if self.is_testing_audio {
+                    self.stop_audio_test();
                 } else {
-                    self.start_test(state, runtime);
+                    self.start_audio_test(state, runtime);
                 }
             }
 
             if ui.button("Refresh Devices").clicked() {
-                self.refresh_devices();
+                self.refresh_audio_devices();
             }
         });
 
@@ -568,15 +661,15 @@ impl SettingsView {
                 state.write().await.loopback_enabled = loopback_enabled;
             });
             // Restart test if active
-            if self.is_testing {
+            if self.is_testing_audio {
                 restart_test = true;
             }
         }
 
         // Restart test if needed (after all UI code to avoid borrow conflicts)
         if restart_test {
-            self.stop_test();
-            self.start_test(state, runtime);
+            self.stop_audio_test();
+            self.start_audio_test(state, runtime);
         }
 
         // Error message
@@ -589,6 +682,132 @@ impl SettingsView {
         ui.add_space(16.0);
         ui.label(
             RichText::new("Click 'Test Audio' to start capturing audio. Enable 'Loopback' to hear your microphone.")
+                .weak()
+                .small(),
+        );
+    }
+
+    /// Render video settings section
+    fn show_video_settings(
+        &mut self,
+        ui: &mut Ui,
+        state: &AppState,
+        runtime: &tokio::runtime::Runtime,
+    ) {
+        ui.heading("Video Settings");
+        ui.add_space(16.0);
+
+        // Get current state
+        let selected_device = runtime.block_on(async {
+            state.read().await.selected_video_device
+        });
+
+        // Clone device list to avoid borrow conflicts
+        let video_devices = self.video_devices.clone();
+
+        // Video Device
+        ui.label(RichText::new("Camera").strong());
+        ui.add_space(4.0);
+
+        let current_device_name = selected_device
+            .and_then(|idx| {
+                video_devices.iter().find(|d| d.index == idx).map(|d| d.name.clone())
+            })
+            .unwrap_or_else(|| "Default".to_string());
+
+        egui::ComboBox::from_id_salt("video_device")
+            .selected_text(&current_device_name)
+            .width(300.0)
+            .show_ui(ui, |ui| {
+                // Default option (first device or index 0)
+                if ui
+                    .selectable_label(selected_device.is_none(), "Default")
+                    .clicked()
+                {
+                    let state = state.clone();
+                    runtime.block_on(async {
+                        state.write().await.selected_video_device = None;
+                    });
+                    // Restart test if active
+                    if self.is_testing_video {
+                        self.stop_video_test();
+                        self.start_video_test(&state, runtime);
+                    }
+                }
+
+                // Device options
+                for device in &video_devices {
+                    let is_selected = selected_device == Some(device.index);
+                    if ui.selectable_label(is_selected, &device.name).clicked() {
+                        let state = state.clone();
+                        let device_index = device.index;
+                        runtime.block_on(async {
+                            state.write().await.selected_video_device = Some(device_index);
+                        });
+                        // Restart test if active
+                        if self.is_testing_video {
+                            self.stop_video_test();
+                            self.start_video_test(&state, runtime);
+                        }
+                    }
+                }
+            });
+
+        ui.add_space(16.0);
+
+        // Test Button
+        ui.horizontal(|ui| {
+            let button_text = if self.is_testing_video {
+                "Stop Test"
+            } else {
+                "Test Video"
+            };
+
+            if ui.button(button_text).clicked() {
+                if self.is_testing_video {
+                    self.stop_video_test();
+                } else {
+                    self.start_video_test(state, runtime);
+                }
+            }
+
+            if ui.button("Refresh Devices").clicked() {
+                self.refresh_video_devices();
+            }
+        });
+
+        ui.add_space(16.0);
+
+        // Video preview
+        if self.is_testing_video {
+            ui.label(RichText::new("Preview").strong());
+            ui.add_space(8.0);
+
+            if let Some(texture) = &self.video_texture {
+                let size = texture.size_vec2();
+                // Scale to fit in preview area (max 320x240)
+                let max_width = 320.0;
+                let max_height = 240.0;
+                let scale = (max_width / size.x).min(max_height / size.y).min(1.0);
+                let display_size = egui::vec2(size.x * scale, size.y * scale);
+
+                ui.image((texture.id(), display_size));
+            } else {
+                ui.label("Starting camera...");
+                ui.spinner();
+            }
+        }
+
+        // Error message
+        if let Some(error) = &self.error_message {
+            ui.add_space(16.0);
+            ui.colored_label(Color32::from_rgb(240, 71, 71), error);
+        }
+
+        // Help text
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new("Click 'Test Video' to preview your camera.")
                 .weak()
                 .small(),
         );

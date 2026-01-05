@@ -65,6 +65,9 @@ pub struct AppStateInner {
 
     // UI state for pending invite code
     pub pending_invite_code: Option<String>,
+
+    // Video settings
+    pub selected_video_device: Option<u32>, // Device index
 }
 
 impl Default for AppStateInner {
@@ -99,6 +102,7 @@ impl Default for AppStateInner {
             gate_threshold_db: -40.0, // -40 dB default threshold
             gate_enabled: true,
             pending_invite_code: None,
+            selected_video_device: None,
         }
     }
 }

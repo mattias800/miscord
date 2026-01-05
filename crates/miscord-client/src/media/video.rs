@@ -5,6 +5,12 @@ use nokhwa::Camera;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
+#[derive(Debug, Clone)]
+pub struct VideoDeviceInfo {
+    pub index: u32,
+    pub name: String,
+}
+
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
@@ -24,9 +30,15 @@ impl VideoCapture {
         }
     }
 
-    pub fn list_devices() -> Result<Vec<String>> {
+    pub fn list_devices() -> Result<Vec<VideoDeviceInfo>> {
         let devices = nokhwa::query(nokhwa::utils::ApiBackend::Auto)?;
-        Ok(devices.iter().map(|d| d.human_name().to_string()).collect())
+        Ok(devices
+            .iter()
+            .map(|d| VideoDeviceInfo {
+                index: d.index().as_index().unwrap_or(0),
+                name: d.human_name().to_string(),
+            })
+            .collect())
     }
 
     pub fn start(&mut self, device_index: Option<u32>) -> Result<mpsc::Receiver<VideoFrame>> {
@@ -65,12 +77,24 @@ impl VideoCapture {
     pub async fn capture_frame(&mut self) -> Result<Option<VideoFrame>> {
         if let Some(camera) = &mut self.camera {
             let frame = camera.frame()?;
-            let resolution = camera.resolution();
+
+            // Decode the frame to RGB image
+            let decoded = frame.decode_image::<RgbFormat>()?;
+            let (width, height) = decoded.dimensions();
+            let data = decoded.into_raw();
+
+            // Verify data length matches expected size, truncate if needed
+            let expected_len = (width * height * 3) as usize;
+            let data = if data.len() > expected_len {
+                data[..expected_len].to_vec()
+            } else {
+                data
+            };
 
             Ok(Some(VideoFrame {
-                width: resolution.width(),
-                height: resolution.height(),
-                data: frame.buffer().to_vec(),
+                width,
+                height,
+                data,
             }))
         } else {
             Ok(None)
