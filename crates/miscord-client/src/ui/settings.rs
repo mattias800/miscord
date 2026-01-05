@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::media::audio::{list_input_devices, list_output_devices, AudioCapture, AudioPlayback};
+use crate::media::audio::{list_input_devices, list_output_devices, AudioCapture, AudioPlayback, linear_to_db};
 use crate::state::AppState;
 
 /// The settings view component
@@ -88,15 +88,15 @@ impl SettingsView {
         self.error_message = None;
 
         // Get selected device and audio settings from state
-        let (input_device, output_device, loopback, gain, gate_threshold, gate_enabled) =
+        let (input_device, output_device, loopback, gain_db, gate_threshold_db, gate_enabled) =
             runtime.block_on(async {
                 let s = state.read().await;
                 (
                     s.selected_input_device.clone(),
                     s.selected_output_device.clone(),
                     s.loopback_enabled,
-                    s.input_gain,
-                    s.gate_threshold,
+                    s.input_gain_db,
+                    s.gate_threshold_db,
                     s.gate_enabled,
                 )
             });
@@ -112,9 +112,9 @@ impl SettingsView {
         // Start capture
         let mut capture = AudioCapture::new();
 
-        // Apply audio settings
-        capture.set_gain(gain);
-        capture.set_gate_threshold(gate_threshold);
+        // Apply audio settings (in dB)
+        capture.set_gain_db(gain_db);
+        capture.set_gate_threshold_db(gate_threshold_db);
         capture.set_gate_enabled(gate_enabled);
 
         match capture.start(input_device_name.as_deref()) {
@@ -259,15 +259,15 @@ impl SettingsView {
         let mut restart_test = false;
 
         // Get current state
-        let (selected_input, selected_output, loopback, input_gain, gate_threshold, gate_enabled) =
+        let (selected_input, selected_output, loopback, input_gain_db, gate_threshold_db, gate_enabled) =
             runtime.block_on(async {
                 let s = state.read().await;
                 (
                     s.selected_input_device.clone(),
                     s.selected_output_device.clone(),
                     s.loopback_enabled,
-                    s.input_gain,
-                    s.gate_threshold,
+                    s.input_gain_db,
+                    s.gate_threshold_db,
                     s.gate_enabled,
                 )
             });
@@ -321,39 +321,45 @@ impl SettingsView {
 
         ui.add_space(8.0);
 
-        // Input Gain Slider
+        // Input Gain Slider (dB)
         ui.label(RichText::new("Input Gain").strong());
         ui.add_space(4.0);
 
-        let mut current_gain = input_gain;
-        let gain_text = format!("{:.0}%", current_gain * 100.0);
+        let mut current_gain_db = input_gain_db;
         let gain_response = ui.add(
-            egui::Slider::new(&mut current_gain, 0.0..=3.0)
-                .text(gain_text)
+            egui::Slider::new(&mut current_gain_db, -20.0..=20.0)
+                .text("dB")
                 .clamp_to_range(true),
         );
         if gain_response.changed() {
             let state = state.clone();
             runtime.block_on(async {
-                state.write().await.input_gain = current_gain;
+                state.write().await.input_gain_db = current_gain_db;
             });
             // Update capture in real-time if testing
             if let Some(capture) = &self.audio_capture {
-                capture.set_gain(current_gain);
+                capture.set_gain_db(current_gain_db);
             }
         }
 
         ui.add_space(8.0);
 
-        // Input Level Meter with Gate Threshold indicator
+        // Input Level Meter with dB scale
         ui.label("Input Level");
-        let level = f32::from_bits(self.input_level.load(Ordering::Relaxed));
-        // Scale level for better visibility (audio RMS is usually quite low)
-        let scaled_level = (level * 10.0).min(1.0);
-        let scaled_gate = (gate_threshold * 10.0).min(1.0);
+
+        // Get level in dB (already stored as dB in the atomic)
+        let level_db = f32::from_bits(self.input_level.load(Ordering::Relaxed));
+
+        // Convert dB to position on meter (-60 to 0 dB range)
+        let db_to_pos = |db: f32| -> f32 {
+            ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+        };
+
+        let level_pos = db_to_pos(level_db);
+        let gate_pos = db_to_pos(gate_threshold_db);
 
         let (rect, _response) = ui.allocate_exact_size(
-            egui::vec2(300.0, 16.0),
+            egui::vec2(300.0, 20.0),
             egui::Sense::hover(),
         );
 
@@ -364,32 +370,32 @@ impl SettingsView {
             Color32::from_rgb(40, 42, 54),
         );
 
-        // Level bar with gradient
-        if scaled_level > 0.0 {
-            let bar_width = rect.width() * scaled_level;
+        // Level bar
+        if level_pos > 0.0 {
+            let bar_width = rect.width() * level_pos;
             let bar_rect = egui::Rect::from_min_size(
                 rect.min,
                 egui::vec2(bar_width, rect.height()),
             );
 
             // Color based on level - gray if below gate, colored if above
-            let is_gated = gate_enabled && scaled_level < scaled_gate;
+            let is_gated = gate_enabled && level_db < gate_threshold_db;
             let color = if is_gated {
                 Color32::from_rgb(100, 100, 100) // Gray when gated
-            } else if scaled_level < 0.6 {
-                Color32::from_rgb(67, 181, 129) // Green
-            } else if scaled_level < 0.85 {
-                Color32::from_rgb(250, 166, 26) // Yellow
+            } else if level_db < -12.0 {
+                Color32::from_rgb(67, 181, 129) // Green (below -12 dB)
+            } else if level_db < -3.0 {
+                Color32::from_rgb(250, 166, 26) // Yellow (-12 to -3 dB)
             } else {
-                Color32::from_rgb(240, 71, 71) // Red
+                Color32::from_rgb(240, 71, 71) // Red (above -3 dB)
             };
 
             ui.painter().rect_filled(bar_rect, 4.0, color);
         }
 
         // Draw gate threshold line if enabled
-        if gate_enabled && scaled_gate > 0.0 {
-            let gate_x = rect.min.x + rect.width() * scaled_gate;
+        if gate_enabled {
+            let gate_x = rect.min.x + rect.width() * gate_pos;
             ui.painter().line_segment(
                 [
                     egui::pos2(gate_x, rect.min.y),
@@ -398,6 +404,47 @@ impl SettingsView {
                 egui::Stroke::new(2.0, Color32::from_rgb(255, 255, 255)),
             );
         }
+
+        // Draw dB scale markers
+        ui.add_space(2.0);
+        let (scale_rect, _) = ui.allocate_exact_size(
+            egui::vec2(300.0, 12.0),
+            egui::Sense::hover(),
+        );
+
+        let db_markers = [-60, -48, -36, -24, -12, -6, 0];
+        for &db in &db_markers {
+            let pos = db_to_pos(db as f32);
+            let x = scale_rect.min.x + scale_rect.width() * pos;
+
+            // Draw tick mark
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x, scale_rect.min.y),
+                    egui::pos2(x, scale_rect.min.y + 4.0),
+                ],
+                egui::Stroke::new(1.0, Color32::from_rgb(150, 150, 150)),
+            );
+
+            // Draw label
+            let label = format!("{}", db);
+            ui.painter().text(
+                egui::pos2(x, scale_rect.min.y + 6.0),
+                egui::Align2::CENTER_TOP,
+                &label,
+                egui::FontId::proportional(9.0),
+                Color32::from_rgb(150, 150, 150),
+            );
+        }
+
+        // Show current level in dB
+        ui.add_space(4.0);
+        let level_text = if level_db <= -60.0 {
+            "-∞ dB".to_string()
+        } else {
+            format!("{:.1} dB", level_db)
+        };
+        ui.label(RichText::new(level_text).small().weak());
 
         ui.add_space(8.0);
 
@@ -417,21 +464,26 @@ impl SettingsView {
 
         if gate_enabled {
             ui.add_space(4.0);
-            let mut current_threshold = gate_threshold;
+            let mut current_threshold_db = gate_threshold_db;
             let threshold_response = ui.add(
-                egui::Slider::new(&mut current_threshold, 0.0..=0.2)
-                    .text("Threshold")
+                egui::Slider::new(&mut current_threshold_db, -60.0..=0.0)
+                    .text("dB")
                     .clamp_to_range(true),
             );
             if threshold_response.changed() {
                 let state = state.clone();
                 runtime.block_on(async {
-                    state.write().await.gate_threshold = current_threshold;
+                    state.write().await.gate_threshold_db = current_threshold_db;
                 });
                 if let Some(capture) = &self.audio_capture {
-                    capture.set_gate_threshold(current_threshold);
+                    capture.set_gate_threshold_db(current_threshold_db);
                 }
             }
+            ui.label(
+                RichText::new("Audio below this level will be muted")
+                    .small()
+                    .weak(),
+            );
         }
 
         ui.add_space(16.0);

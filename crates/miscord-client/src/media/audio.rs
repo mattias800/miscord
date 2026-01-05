@@ -4,6 +4,22 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Convert linear amplitude (0.0-1.0) to decibels
+/// Returns -60.0 for very quiet signals, 0.0 for full scale
+pub fn linear_to_db(linear: f32) -> f32 {
+    if linear <= 0.0 {
+        -60.0
+    } else {
+        (20.0 * linear.log10()).max(-60.0)
+    }
+}
+
+/// Convert decibels to linear amplitude
+/// -60 dB = 0.001, 0 dB = 1.0
+pub fn db_to_linear(db: f32) -> f32 {
+    10.0f32.powf(db / 20.0)
+}
+
 /// Information about an audio device
 #[derive(Debug, Clone)]
 pub struct AudioDevice {
@@ -56,12 +72,12 @@ pub fn list_output_devices() -> Result<Vec<AudioDevice>> {
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
     is_capturing: bool,
-    /// Atomic storage for input level (RMS as f32 bits, after gain)
-    level: Arc<AtomicU32>,
-    /// Atomic storage for gain (f32 bits, 0.0-3.0)
-    gain: Arc<AtomicU32>,
-    /// Atomic storage for gate threshold (f32 bits, 0.0-1.0)
-    gate_threshold: Arc<AtomicU32>,
+    /// Atomic storage for input level in dB (f32 bits, -60 to 0)
+    level_db: Arc<AtomicU32>,
+    /// Atomic storage for gain in dB (f32 bits, -20 to +20)
+    gain_db: Arc<AtomicU32>,
+    /// Atomic storage for gate threshold in dB (f32 bits, -60 to 0)
+    gate_threshold_db: Arc<AtomicU32>,
     /// Whether gate is enabled
     gate_enabled: Arc<AtomicBool>,
 }
@@ -71,9 +87,9 @@ impl AudioCapture {
         Self {
             stream: None,
             is_capturing: false,
-            level: Arc::new(AtomicU32::new(0)),
-            gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
-            gate_threshold: Arc::new(AtomicU32::new(0.01f32.to_bits())),
+            level_db: Arc::new(AtomicU32::new((-60.0f32).to_bits())),
+            gain_db: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            gate_threshold_db: Arc::new(AtomicU32::new((-40.0f32).to_bits())),
             gate_enabled: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -87,24 +103,24 @@ impl AudioCapture {
         Ok(devices)
     }
 
-    /// Get the current input level (0.0 to 1.0)
-    pub fn get_level(&self) -> f32 {
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+    /// Get the current input level in dB (-60 to 0)
+    pub fn get_level_db(&self) -> f32 {
+        f32::from_bits(self.level_db.load(Ordering::Relaxed))
     }
 
-    /// Get a clone of the level Arc for external monitoring
+    /// Get a clone of the level Arc for external monitoring (stores dB as f32 bits)
     pub fn level_monitor(&self) -> Arc<AtomicU32> {
-        self.level.clone()
+        self.level_db.clone()
     }
 
-    /// Set the input gain (0.0 to 3.0, where 1.0 is unity)
-    pub fn set_gain(&self, gain: f32) {
-        self.gain.store(gain.clamp(0.0, 3.0).to_bits(), Ordering::Relaxed);
+    /// Set the input gain in dB (-20 to +20, where 0 is unity)
+    pub fn set_gain_db(&self, gain_db: f32) {
+        self.gain_db.store(gain_db.clamp(-20.0, 20.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// Set the gate threshold (0.0 to 1.0)
-    pub fn set_gate_threshold(&self, threshold: f32) {
-        self.gate_threshold.store(threshold.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    /// Set the gate threshold in dB (-60 to 0)
+    pub fn set_gate_threshold_db(&self, threshold_db: f32) {
+        self.gate_threshold_db.store(threshold_db.clamp(-60.0, 0.0).to_bits(), Ordering::Relaxed);
     }
 
     /// Enable or disable the noise gate
@@ -112,9 +128,9 @@ impl AudioCapture {
         self.gate_enabled.store(enabled, Ordering::Relaxed);
     }
 
-    /// Get the current gate threshold
-    pub fn get_gate_threshold(&self) -> f32 {
-        f32::from_bits(self.gate_threshold.load(Ordering::Relaxed))
+    /// Get the current gate threshold in dB
+    pub fn get_gate_threshold_db(&self) -> f32 {
+        f32::from_bits(self.gate_threshold_db.load(Ordering::Relaxed))
     }
 
     pub fn start(&mut self, device_name: Option<&str>) -> Result<mpsc::Receiver<Vec<f32>>> {
@@ -140,41 +156,44 @@ impl AudioCapture {
         );
 
         let (tx, rx) = mpsc::channel(100);
-        let level = self.level.clone();
-        let gain = self.gain.clone();
-        let gate_threshold = self.gate_threshold.clone();
-        let gate_enabled = self.gate_enabled.clone();
+        let level_db_arc = self.level_db.clone();
+        let gain_db_arc = self.gain_db.clone();
+        let gate_threshold_db_arc = self.gate_threshold_db.clone();
+        let gate_enabled_arc = self.gate_enabled.clone();
 
         let stream = device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Get current gain and gate settings
-                let current_gain = f32::from_bits(gain.load(Ordering::Relaxed));
-                let current_threshold = f32::from_bits(gate_threshold.load(Ordering::Relaxed));
-                let gate_on = gate_enabled.load(Ordering::Relaxed);
+                // Get current gain and gate settings (in dB)
+                let current_gain_db = f32::from_bits(gain_db_arc.load(Ordering::Relaxed));
+                let current_threshold_db = f32::from_bits(gate_threshold_db_arc.load(Ordering::Relaxed));
+                let gate_on = gate_enabled_arc.load(Ordering::Relaxed);
+
+                // Convert gain from dB to linear
+                let gain_linear = db_to_linear(current_gain_db);
 
                 // Convert to mono by averaging all channels, apply gain
                 let mono_samples: Vec<f32> = if channels > 1 {
                     data.chunks(channels)
-                        .map(|frame| (frame.iter().sum::<f32>() / channels as f32) * current_gain)
+                        .map(|frame| (frame.iter().sum::<f32>() / channels as f32) * gain_linear)
                         .collect()
                 } else {
-                    data.iter().map(|&s| s * current_gain).collect()
+                    data.iter().map(|&s| s * gain_linear).collect()
                 };
 
-                // Calculate RMS level (after gain, before gate)
-                if !mono_samples.is_empty() {
+                // Calculate RMS level (after gain, before gate) and convert to dB
+                let level_db = if !mono_samples.is_empty() {
                     let sum: f32 = mono_samples.iter().map(|s| s * s).sum();
                     let rms = (sum / mono_samples.len() as f32).sqrt();
-                    // Clamp to 0.0-1.0 range
-                    let clamped = rms.min(1.0);
-                    level.store(clamped.to_bits(), Ordering::Relaxed);
-                }
+                    linear_to_db(rms)
+                } else {
+                    -60.0
+                };
+                level_db_arc.store(level_db.to_bits(), Ordering::Relaxed);
 
-                // Apply noise gate
+                // Apply noise gate (compare in dB)
                 let output_samples: Vec<f32> = if gate_on {
-                    let rms = f32::from_bits(level.load(Ordering::Relaxed));
-                    if rms < current_threshold {
+                    if level_db < current_threshold_db {
                         // Below threshold - mute
                         vec![0.0; mono_samples.len()]
                     } else {
@@ -202,7 +221,7 @@ impl AudioCapture {
     pub fn stop(&mut self) {
         self.stream = None;
         self.is_capturing = false;
-        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.level_db.store((-60.0f32).to_bits(), Ordering::Relaxed);
     }
 
     pub fn is_capturing(&self) -> bool {

@@ -54,10 +54,10 @@ pub struct AppStateInner {
     // Audio settings
     pub selected_input_device: Option<String>,
     pub selected_output_device: Option<String>,
-    pub input_gain: f32,       // 0.0 to 3.0 (0% to 300%)
+    pub input_gain_db: f32,    // -20 to +20 dB
     pub output_volume: f32,
     pub loopback_enabled: bool,
-    pub gate_threshold: f32,   // 0.0 to 1.0, audio below this is muted
+    pub gate_threshold_db: f32, // -60 to 0 dB, audio below this is muted
     pub gate_enabled: bool,
 }
 
@@ -86,10 +86,10 @@ impl Default for AppStateInner {
             connection_error: None,
             selected_input_device: None,
             selected_output_device: None,
-            input_gain: 1.0,
+            input_gain_db: 0.0,      // 0 dB = unity gain
             output_volume: 1.0,
             loopback_enabled: false,
-            gate_threshold: 0.01,  // Default gate at 1%
+            gate_threshold_db: -40.0, // -40 dB default threshold
             gate_enabled: true,
         }
     }
