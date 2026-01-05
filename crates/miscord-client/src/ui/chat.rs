@@ -134,12 +134,10 @@ impl ChatView {
         self.message_input.clear();
 
         let network = network.clone();
-        let state = state.clone();
 
         runtime.spawn(async move {
-            if let Ok(message) = network.send_message(channel_id, &content).await {
-                state.add_message(message).await;
-            }
+            // Just send - the message will come back via WebSocket broadcast
+            let _ = network.send_message(channel_id, &content).await;
         });
     }
 }
