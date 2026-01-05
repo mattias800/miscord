@@ -56,8 +56,14 @@ pub fn list_output_devices() -> Result<Vec<AudioDevice>> {
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
     is_capturing: bool,
-    /// Atomic storage for input level (RMS as f32 bits)
+    /// Atomic storage for input level (RMS as f32 bits, after gain)
     level: Arc<AtomicU32>,
+    /// Atomic storage for gain (f32 bits, 0.0-3.0)
+    gain: Arc<AtomicU32>,
+    /// Atomic storage for gate threshold (f32 bits, 0.0-1.0)
+    gate_threshold: Arc<AtomicU32>,
+    /// Whether gate is enabled
+    gate_enabled: Arc<AtomicBool>,
 }
 
 impl AudioCapture {
@@ -66,6 +72,9 @@ impl AudioCapture {
             stream: None,
             is_capturing: false,
             level: Arc::new(AtomicU32::new(0)),
+            gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            gate_threshold: Arc::new(AtomicU32::new(0.01f32.to_bits())),
+            gate_enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -86,6 +95,26 @@ impl AudioCapture {
     /// Get a clone of the level Arc for external monitoring
     pub fn level_monitor(&self) -> Arc<AtomicU32> {
         self.level.clone()
+    }
+
+    /// Set the input gain (0.0 to 3.0, where 1.0 is unity)
+    pub fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.clamp(0.0, 3.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Set the gate threshold (0.0 to 1.0)
+    pub fn set_gate_threshold(&self, threshold: f32) {
+        self.gate_threshold.store(threshold.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Enable or disable the noise gate
+    pub fn set_gate_enabled(&self, enabled: bool) {
+        self.gate_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Get the current gate threshold
+    pub fn get_gate_threshold(&self) -> f32 {
+        f32::from_bits(self.gate_threshold.load(Ordering::Relaxed))
     }
 
     pub fn start(&mut self, device_name: Option<&str>) -> Result<mpsc::Receiver<Vec<f32>>> {
@@ -112,29 +141,50 @@ impl AudioCapture {
 
         let (tx, rx) = mpsc::channel(100);
         let level = self.level.clone();
+        let gain = self.gain.clone();
+        let gate_threshold = self.gate_threshold.clone();
+        let gate_enabled = self.gate_enabled.clone();
 
         let stream = device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Calculate RMS level
-                if !data.is_empty() {
-                    let sum: f32 = data.iter().map(|s| s * s).sum();
-                    let rms = (sum / data.len() as f32).sqrt();
+                // Get current gain and gate settings
+                let current_gain = f32::from_bits(gain.load(Ordering::Relaxed));
+                let current_threshold = f32::from_bits(gate_threshold.load(Ordering::Relaxed));
+                let gate_on = gate_enabled.load(Ordering::Relaxed);
+
+                // Convert to mono by averaging all channels, apply gain
+                let mono_samples: Vec<f32> = if channels > 1 {
+                    data.chunks(channels)
+                        .map(|frame| (frame.iter().sum::<f32>() / channels as f32) * current_gain)
+                        .collect()
+                } else {
+                    data.iter().map(|&s| s * current_gain).collect()
+                };
+
+                // Calculate RMS level (after gain, before gate)
+                if !mono_samples.is_empty() {
+                    let sum: f32 = mono_samples.iter().map(|s| s * s).sum();
+                    let rms = (sum / mono_samples.len() as f32).sqrt();
                     // Clamp to 0.0-1.0 range
                     let clamped = rms.min(1.0);
                     level.store(clamped.to_bits(), Ordering::Relaxed);
                 }
 
-                // Convert to mono by averaging all channels
-                let mono_samples: Vec<f32> = if channels > 1 {
-                    data.chunks(channels)
-                        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-                        .collect()
+                // Apply noise gate
+                let output_samples: Vec<f32> = if gate_on {
+                    let rms = f32::from_bits(level.load(Ordering::Relaxed));
+                    if rms < current_threshold {
+                        // Below threshold - mute
+                        vec![0.0; mono_samples.len()]
+                    } else {
+                        mono_samples
+                    }
                 } else {
-                    data.to_vec()
+                    mono_samples
                 };
 
-                let _ = tx.try_send(mono_samples);
+                let _ = tx.try_send(output_samples);
             },
             |err| {
                 tracing::error!("Audio capture error: {}", err);

@@ -87,15 +87,19 @@ impl SettingsView {
     fn start_test(&mut self, state: &AppState, runtime: &tokio::runtime::Runtime) {
         self.error_message = None;
 
-        // Get selected device from state
-        let (input_device, output_device, loopback) = runtime.block_on(async {
-            let s = state.read().await;
-            (
-                s.selected_input_device.clone(),
-                s.selected_output_device.clone(),
-                s.loopback_enabled,
-            )
-        });
+        // Get selected device and audio settings from state
+        let (input_device, output_device, loopback, gain, gate_threshold, gate_enabled) =
+            runtime.block_on(async {
+                let s = state.read().await;
+                (
+                    s.selected_input_device.clone(),
+                    s.selected_output_device.clone(),
+                    s.loopback_enabled,
+                    s.input_gain,
+                    s.gate_threshold,
+                    s.gate_enabled,
+                )
+            });
 
         // Strip "(Default)" suffix if present for device lookup
         let input_device_name = input_device.as_ref().map(|s| {
@@ -107,6 +111,12 @@ impl SettingsView {
 
         // Start capture
         let mut capture = AudioCapture::new();
+
+        // Apply audio settings
+        capture.set_gain(gain);
+        capture.set_gate_threshold(gate_threshold);
+        capture.set_gate_enabled(gate_enabled);
+
         match capture.start(input_device_name.as_deref()) {
             Ok(rx) => {
                 self.input_level = capture.level_monitor();
@@ -249,14 +259,18 @@ impl SettingsView {
         let mut restart_test = false;
 
         // Get current state
-        let (selected_input, selected_output, loopback) = runtime.block_on(async {
-            let s = state.read().await;
-            (
-                s.selected_input_device.clone(),
-                s.selected_output_device.clone(),
-                s.loopback_enabled,
-            )
-        });
+        let (selected_input, selected_output, loopback, input_gain, gate_threshold, gate_enabled) =
+            runtime.block_on(async {
+                let s = state.read().await;
+                (
+                    s.selected_input_device.clone(),
+                    s.selected_output_device.clone(),
+                    s.loopback_enabled,
+                    s.input_gain,
+                    s.gate_threshold,
+                    s.gate_enabled,
+                )
+            });
 
         // Clone device lists to avoid borrow conflicts
         let input_devices = self.input_devices.clone();
@@ -307,11 +321,36 @@ impl SettingsView {
 
         ui.add_space(8.0);
 
-        // Input Level Meter
+        // Input Gain Slider
+        ui.label(RichText::new("Input Gain").strong());
+        ui.add_space(4.0);
+
+        let mut current_gain = input_gain;
+        let gain_text = format!("{:.0}%", current_gain * 100.0);
+        let gain_response = ui.add(
+            egui::Slider::new(&mut current_gain, 0.0..=3.0)
+                .text(gain_text)
+                .clamp_to_range(true),
+        );
+        if gain_response.changed() {
+            let state = state.clone();
+            runtime.block_on(async {
+                state.write().await.input_gain = current_gain;
+            });
+            // Update capture in real-time if testing
+            if let Some(capture) = &self.audio_capture {
+                capture.set_gain(current_gain);
+            }
+        }
+
+        ui.add_space(8.0);
+
+        // Input Level Meter with Gate Threshold indicator
         ui.label("Input Level");
         let level = f32::from_bits(self.input_level.load(Ordering::Relaxed));
         // Scale level for better visibility (audio RMS is usually quite low)
         let scaled_level = (level * 10.0).min(1.0);
+        let scaled_gate = (gate_threshold * 10.0).min(1.0);
 
         let (rect, _response) = ui.allocate_exact_size(
             egui::vec2(300.0, 16.0),
@@ -333,8 +372,11 @@ impl SettingsView {
                 egui::vec2(bar_width, rect.height()),
             );
 
-            // Color based on level
-            let color = if scaled_level < 0.6 {
+            // Color based on level - gray if below gate, colored if above
+            let is_gated = gate_enabled && scaled_level < scaled_gate;
+            let color = if is_gated {
+                Color32::from_rgb(100, 100, 100) // Gray when gated
+            } else if scaled_level < 0.6 {
                 Color32::from_rgb(67, 181, 129) // Green
             } else if scaled_level < 0.85 {
                 Color32::from_rgb(250, 166, 26) // Yellow
@@ -343,6 +385,53 @@ impl SettingsView {
             };
 
             ui.painter().rect_filled(bar_rect, 4.0, color);
+        }
+
+        // Draw gate threshold line if enabled
+        if gate_enabled && scaled_gate > 0.0 {
+            let gate_x = rect.min.x + rect.width() * scaled_gate;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(gate_x, rect.min.y),
+                    egui::pos2(gate_x, rect.max.y),
+                ],
+                egui::Stroke::new(2.0, Color32::from_rgb(255, 255, 255)),
+            );
+        }
+
+        ui.add_space(8.0);
+
+        // Gate controls
+        ui.horizontal(|ui| {
+            let mut gate_on = gate_enabled;
+            if ui.checkbox(&mut gate_on, "Noise Gate").changed() {
+                let state = state.clone();
+                runtime.block_on(async {
+                    state.write().await.gate_enabled = gate_on;
+                });
+                if let Some(capture) = &self.audio_capture {
+                    capture.set_gate_enabled(gate_on);
+                }
+            }
+        });
+
+        if gate_enabled {
+            ui.add_space(4.0);
+            let mut current_threshold = gate_threshold;
+            let threshold_response = ui.add(
+                egui::Slider::new(&mut current_threshold, 0.0..=0.2)
+                    .text("Threshold")
+                    .clamp_to_range(true),
+            );
+            if threshold_response.changed() {
+                let state = state.clone();
+                runtime.block_on(async {
+                    state.write().await.gate_threshold = current_threshold;
+                });
+                if let Some(capture) = &self.audio_capture {
+                    capture.set_gate_threshold(current_threshold);
+                }
+            }
         }
 
         ui.add_space(16.0);

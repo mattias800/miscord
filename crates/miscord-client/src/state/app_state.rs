@@ -54,9 +54,11 @@ pub struct AppStateInner {
     // Audio settings
     pub selected_input_device: Option<String>,
     pub selected_output_device: Option<String>,
-    pub input_volume: f32,
+    pub input_gain: f32,       // 0.0 to 3.0 (0% to 300%)
     pub output_volume: f32,
     pub loopback_enabled: bool,
+    pub gate_threshold: f32,   // 0.0 to 1.0, audio below this is muted
+    pub gate_enabled: bool,
 }
 
 impl Default for AppStateInner {
@@ -84,9 +86,11 @@ impl Default for AppStateInner {
             connection_error: None,
             selected_input_device: None,
             selected_output_device: None,
-            input_volume: 1.0,
+            input_gain: 1.0,
             output_volume: 1.0,
             loopback_enabled: false,
+            gate_threshold: 0.01,  // Default gate at 1%
+            gate_enabled: true,
         }
     }
 }
