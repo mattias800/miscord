@@ -30,6 +30,12 @@ webrtc = { workspace = true }
 
 # Media capture
 nokhwa = { workspace = true }
+turbojpeg = { workspace = true }
+
+# GStreamer for video
+gstreamer = { workspace = true }
+gstreamer-app = { workspace = true }
+gstreamer-video = { workspace = true }
 
 # Audio
 cpal = { workspace = true }

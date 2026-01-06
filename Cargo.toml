@@ -65,6 +65,14 @@ egui = "0.30"
 cpal = "0.15"
 opus = "0.3"
 
+# Fast JPEG decoding
+turbojpeg = "1.0"
+
+# GStreamer for video capture/encoding/decoding
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+
 # Workspace members
 miscord-protocol = { path = "crates/miscord-protocol" }
 miscord-media = { path = "crates/miscord-media" }

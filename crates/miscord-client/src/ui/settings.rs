@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::media::audio::{list_input_devices, list_output_devices, AudioCapture, AudioPlayback, linear_to_db};
-use crate::media::video::{VideoCapture, VideoDeviceInfo};
+use crate::media::gst_video::{GstVideoCapture, VideoDeviceInfo};
 use crate::state::AppState;
 
 /// The settings view component
@@ -24,7 +24,7 @@ pub struct SettingsView {
     input_devices: Vec<String>,
     output_devices: Vec<String>,
     // Video test state
-    video_capture: Option<VideoCapture>,
+    video_capture: Option<GstVideoCapture>,
     is_testing_video: bool,
     video_texture: Option<TextureHandle>,
     video_devices: Vec<VideoDeviceInfo>,
@@ -95,7 +95,7 @@ impl SettingsView {
 
     /// Refresh the video device list
     fn refresh_video_devices(&mut self) {
-        self.video_devices = VideoCapture::list_devices().unwrap_or_default();
+        self.video_devices = GstVideoCapture::list_devices().unwrap_or_default();
     }
 
     /// Start audio test (capture and optionally playback)
@@ -183,15 +183,20 @@ impl SettingsView {
             state.read().await.selected_video_device
         });
 
-        let mut capture = VideoCapture::new();
-
-        match capture.start(device_index) {
-            Ok(_rx) => {
-                self.video_capture = Some(capture);
-                self.is_testing_video = true;
+        match GstVideoCapture::new() {
+            Ok(mut capture) => {
+                match capture.start(device_index) {
+                    Ok(()) => {
+                        self.video_capture = Some(capture);
+                        self.is_testing_video = true;
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Video capture error: {}", e));
+                    }
+                }
             }
             Err(e) => {
-                self.error_message = Some(format!("Video capture error: {}", e));
+                self.error_message = Some(format!("Failed to initialize GStreamer: {}", e));
             }
         }
     }
@@ -230,8 +235,9 @@ impl SettingsView {
 
         // Capture video frame if testing
         if self.is_testing_video {
-            if let Some(capture) = &mut self.video_capture {
-                if let Ok(Some(frame)) = futures::executor::block_on(capture.capture_frame()) {
+            if let Some(capture) = &self.video_capture {
+                if let Some(frame) = capture.get_frame() {
+                    tracing::debug!("Settings: got frame {}x{}", frame.width, frame.height);
                     // Convert RGB to ColorImage
                     let image = ColorImage::from_rgb(
                         [frame.width as usize, frame.height as usize],
@@ -250,8 +256,8 @@ impl SettingsView {
                     }
                 }
             }
-            // Request repaint for continuous video updates
-            ctx.request_repaint();
+            // Request repaint for continuous video updates at ~30 FPS
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
 
         // Full screen settings panel
