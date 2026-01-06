@@ -440,78 +440,11 @@ async fn handle_sfu_offer(
         return;
     }
 
-    // For renegotiation: manually detect new tracks from the SDP
-    // WebRTC-rs doesn't always fire on_track for tracks added during renegotiation
-    if is_renegotiation {
-        // Parse SDP to find track info (msid lines contain stream-id and track-id)
-        for line in sdp.lines() {
-            if line.starts_with("a=msid:") {
-                // Format: a=msid:<stream-id> <track-id>
-                let parts: Vec<&str> = line.trim_start_matches("a=msid:").split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let stream_id = parts[0];
-                    let track_id = parts[1];
-
-                    // Check if this is a screen track we haven't processed yet
-                    if stream_id.contains("screen") {
-                        tracing::info!(
-                            "Detected screen track in renegotiation SDP: stream={}, track={}",
-                            stream_id,
-                            track_id
-                        );
-
-                        // Check if we already have a router for this track
-                        if let Some(session) = state.sfu.get_session(channel_id).await {
-                            let existing_routers = session.get_user_routers_by_type(user_id, TrackType::Screen).await;
-                            if existing_routers.is_empty() {
-                                tracing::info!(
-                                    "No existing screen router for user {}, will be created when track data arrives",
-                                    user_id
-                                );
-                                // The track router will be created when on_track fires
-                                // or we need to poll for the track via transceivers
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Try to get tracks from transceivers (WebRTC-rs workaround)
-        let transceivers = peer_connection.get_transceivers().await;
-        tracing::info!("Checking {} transceivers for screen tracks", transceivers.len());
-        for (i, transceiver) in transceivers.iter().enumerate() {
-            let receiver = transceiver.receiver().await;
-            let tracks = receiver.tracks().await;
-            tracing::info!("Transceiver {} has {} tracks", i, tracks.len());
-            for track in tracks {
-                let stream_id = track.stream_id().to_string();
-                let track_id = track.id().to_string();
-                tracing::info!("  Track: stream={}, id={}", stream_id, track_id);
-
-                // Check if this is a screen track
-                if stream_id.contains("screen") {
-                    tracing::info!(
-                        "Found screen track via transceiver: stream={}, track={}, kind={:?}",
-                        stream_id,
-                        track_id,
-                        track.kind()
-                    );
-
-                    // Check if we need to create a router for this track
-                    if let Some(session) = state.sfu.get_session(channel_id).await {
-                        let existing_routers = session.get_user_routers_by_type(user_id, TrackType::Screen).await;
-                        if existing_routers.is_empty() {
-                            tracing::info!("Creating track router for screen track from transceiver");
-                            // Handle this track
-                            let state_clone = state.clone();
-                            handle_incoming_track(state_clone, channel_id, user_id, track).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Note: We used to have transceiver polling here as a workaround for on_track
+    // not firing during renegotiation. However, re-registering the on_track callback
+    // on the existing peer connection (done above) properly handles renegotiation.
+    // The transceiver polling caused issues because receiver.tracks() returns stale
+    // track references that close immediately when read from.
 
     // Add existing tracks from other publishers to this peer connection
     // Only for new connections, not renegotiations
@@ -883,6 +816,22 @@ async fn handle_sfu_subscribe_track(
                     .await;
             }
         }
+
+        // Request keyframe from the publisher so the new subscriber can start decoding
+        // H.264 requires a keyframe (IDR) to start decoding, and the subscriber
+        // may have missed the last keyframe
+        state
+            .connections
+            .send_to_user(
+                target_user_id,
+                &ServerMessage::SfuRequestKeyframe { track_type },
+            )
+            .await;
+        tracing::info!(
+            "Requested keyframe from user {} for {:?} track",
+            target_user_id,
+            track_type
+        );
 
         tracing::info!(
             "User {} successfully subscribed to {:?} from user {}",

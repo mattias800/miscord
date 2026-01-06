@@ -77,6 +77,7 @@ pub struct AppStateInner {
     pub sfu_renegotiate: Option<String>,
     pub pending_sfu_ice_candidates: Vec<SfuIceCandidate>,
     pub sfu_tracks: HashMap<Uuid, Vec<SfuTrackInfo>>, // user_id -> tracks
+    pub pending_keyframe_requests: Vec<miscord_protocol::TrackType>,
 }
 
 impl Default for AppStateInner {
@@ -119,6 +120,7 @@ impl Default for AppStateInner {
             sfu_renegotiate: None,
             pending_sfu_ice_candidates: Vec::new(),
             sfu_tracks: HashMap::new(),
+            pending_keyframe_requests: Vec::new(),
         }
     }
 }
@@ -448,6 +450,19 @@ impl AppState {
         state.sfu_renegotiate = None;
         state.pending_sfu_ice_candidates.clear();
         state.sfu_tracks.clear();
+        state.pending_keyframe_requests.clear();
+    }
+
+    /// Called when server requests a keyframe for a track type
+    pub async fn sfu_request_keyframe(&self, track_type: miscord_protocol::TrackType) {
+        let mut state = self.inner.write().await;
+        state.pending_keyframe_requests.push(track_type);
+    }
+
+    /// Take any pending keyframe requests
+    pub async fn take_pending_keyframe_requests(&self) -> Vec<miscord_protocol::TrackType> {
+        let mut state = self.inner.write().await;
+        std::mem::take(&mut state.pending_keyframe_requests)
     }
 }
 

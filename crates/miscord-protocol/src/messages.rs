@@ -183,4 +183,7 @@ pub enum ServerMessage {
 
     /// SFU: Server needs to renegotiate (new track available)
     SfuRenegotiate { sdp: String },
+
+    /// SFU: Request keyframe from encoder (when new subscriber joins)
+    SfuRequestKeyframe { track_type: TrackType },
 }

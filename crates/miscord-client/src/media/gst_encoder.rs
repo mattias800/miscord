@@ -109,10 +109,13 @@ fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
             // vtenc_h264_hw is hardware-only, vtenc_h264 may fall back to software
             // allow-frame-reordering=false disables B-frames for lower latency
             // max-keyframe-interval ensures keyframes every second
+            // name=encoder allows us to find it later for force-keyframe
+            // h264parse config-interval=-1 inserts SPS/PPS before every IDR
+            // stream-format=byte-stream ensures Annex B output (start codes, not length prefixed)
             format!(
-                "{} allow-frame-reordering=false max-keyframe-interval=30 \
+                "{} name=encoder allow-frame-reordering=false max-keyframe-interval=30 \
                  max-keyframe-interval-duration=1000000000 bitrate={} ! \
-                 h264parse config-interval=-1",
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 encoder,
                 bitrate / 1000  // vtenc uses kbps
             )
@@ -122,47 +125,47 @@ fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
             // preset=low-latency-hq for good quality with low latency
             // rc-mode=cbr for constant bitrate
             format!(
-                "nvh264enc preset=low-latency-hq rc-mode=cbr bitrate={} zerolatency=true ! \
-                 h264parse config-interval=-1",
+                "nvh264enc name=encoder preset=low-latency-hq rc-mode=cbr bitrate={} zerolatency=true ! \
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 bitrate / 1000
             )
         }
         "vaapih264enc" => {
             // VAAPI encoder (Intel/AMD on Linux)
             format!(
-                "vaapih264enc rate-control=cbr bitrate={} keyframe-period=60 ! \
-                 h264parse config-interval=-1",
+                "vaapih264enc name=encoder rate-control=cbr bitrate={} keyframe-period=60 ! \
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 bitrate / 1000
             )
         }
         "amfh264enc" => {
             // AMD AMF encoder (Windows)
             format!(
-                "amfh264enc bitrate={} rate-control=cbr ! \
-                 h264parse config-interval=-1",
+                "amfh264enc name=encoder bitrate={} rate-control=cbr ! \
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 bitrate / 1000
             )
         }
         "qsvh264enc" => {
             // Intel QuickSync (Windows)
             format!(
-                "qsvh264enc bitrate={} rate-control=cbr low-latency=true ! \
-                 h264parse config-interval=-1",
+                "qsvh264enc name=encoder bitrate={} rate-control=cbr low-latency=true ! \
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 bitrate / 1000
             )
         }
         "mfh264enc" => {
             // MediaFoundation (Windows fallback)
             format!(
-                "mfh264enc bitrate={} ! \
-                 h264parse config-interval=-1",
+                "mfh264enc name=encoder bitrate={} ! \
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 bitrate
             )
         }
         _ => {
             // Generic fallback format
             format!(
-                "{} bitrate={} ! h264parse config-interval=-1",
+                "{} name=encoder bitrate={} ! h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 encoder,
                 bitrate / 1000
             )
@@ -203,6 +206,7 @@ pub struct GstH264Encoder {
     pipeline: gst::Pipeline,
     appsrc: gst_app::AppSrc,
     appsink: gst_app::AppSink,
+    encoder: gst::Element,
     width: u32,
     height: u32,
     fps: u32,
@@ -284,6 +288,11 @@ impl GstH264Encoder {
             }
         }
 
+        // Get reference to the encoder element for force-keyframe support
+        let encoder_element = pipeline
+            .by_name("encoder")
+            .ok_or_else(|| anyhow!("Failed to find encoder element in pipeline"))?;
+
         tracing::info!(
             "H.264 hardware encoder ({}) initialized for {}x{} @{}fps",
             encoder, width, height, fps
@@ -293,6 +302,7 @@ impl GstH264Encoder {
             pipeline,
             appsrc,
             appsink,
+            encoder: encoder_element,
             width,
             height,
             fps,
@@ -356,7 +366,37 @@ impl GstH264Encoder {
                 let buffer = sample.buffer().ok_or_else(|| anyhow!("No buffer in sample"))?;
                 let map = buffer.map_readable()?;
                 let data = map.as_slice().to_vec();
-                tracing::debug!("H.264 encoded frame: {} bytes", data.len());
+
+                // Log NAL types in the encoded frame for debugging
+                static ENCODE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let count = ENCODE_COUNT.fetch_add(1, Ordering::SeqCst);
+                if count < 10 && !data.is_empty() {
+                    // Find NAL units and log their types
+                    let mut i = 0;
+                    let mut nal_info = Vec::new();
+                    while i < data.len().saturating_sub(4) {
+                        // Look for start codes (00 00 00 01 or 00 00 01)
+                        if data[i] == 0 && data[i+1] == 0 {
+                            let start_code_len = if i + 3 < data.len() && data[i+2] == 0 && data[i+3] == 1 { 4 }
+                                else if data[i+2] == 1 { 3 }
+                                else { 0 };
+                            if start_code_len > 0 {
+                                let nal_start = i + start_code_len;
+                                if nal_start < data.len() {
+                                    let nal_header = data[nal_start];
+                                    let nal_type = nal_header & 0x1f;
+                                    nal_info.push(format!("type={}", nal_type));
+                                }
+                                i = nal_start;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                    tracing::info!("Encoded frame #{}: {} bytes, NALs: [{}]", count, data.len(), nal_info.join(", "));
+                } else {
+                    tracing::debug!("H.264 encoded frame: {} bytes", data.len());
+                }
                 Ok(data)
             }
             None => {
@@ -370,6 +410,43 @@ impl GstH264Encoder {
     pub fn height(&self) -> u32 { self.height }
     pub fn fps(&self) -> u32 { self.fps }
     pub fn encoder_name(&self) -> &str { &self.encoder_name }
+
+    /// Force the encoder to generate a keyframe (IDR frame)
+    /// This is needed when a new subscriber joins and needs to start decoding
+    pub fn force_keyframe(&self) -> Result<()> {
+        use gst::event::CustomDownstream;
+
+        // Create a force-key-unit event
+        // This tells the encoder to produce an IDR frame as soon as possible
+        // The event must be sent downstream (towards the encoder) using CustomDownstream
+        let structure = gst::Structure::builder("GstForceKeyUnit")
+            .field("all-headers", true)
+            .build();
+
+        let event = CustomDownstream::new(structure);
+
+        // Get the encoder's sink pad and send the event there
+        if let Some(sink_pad) = self.encoder.static_pad("sink") {
+            if sink_pad.send_event(event) {
+                tracing::info!("Sent force-keyframe request to encoder via sink pad");
+                return Ok(());
+            }
+        }
+
+        // Fallback: try sending to encoder element directly
+        let structure = gst::Structure::builder("GstForceKeyUnit")
+            .field("all-headers", true)
+            .build();
+        let event = CustomDownstream::new(structure);
+
+        if self.encoder.send_event(event) {
+            tracing::info!("Sent force-keyframe request to encoder element");
+            Ok(())
+        } else {
+            tracing::warn!("Failed to send force-keyframe event to encoder");
+            Err(anyhow!("Failed to send force-keyframe event"))
+        }
+    }
 
     pub fn stop(&mut self) {
         self.is_running.store(false, Ordering::SeqCst);
@@ -392,6 +469,8 @@ pub struct GstH264Decoder {
     appsink: gst_app::AppSink,
     decoder_name: String,
     is_running: Arc<AtomicBool>,
+    /// Buffer for reassembling FU-A fragmented NAL units
+    fu_a_buffer: std::sync::Mutex<Vec<u8>>,
 }
 
 impl GstH264Decoder {
@@ -402,10 +481,11 @@ impl GstH264Decoder {
         let decoder_segment = build_decoder_pipeline(decoder);
 
         // Pipeline for RTP H.264: appsrc → rtph264depay → h264parse → hw_decoder → videoconvert → appsink
+        // Note: We manually depayload RTP because GStreamer's rtph264depay has issues with
+        // RTP header extensions used by webrtc-rs. Instead, we feed raw H.264 NAL units.
         let pipeline_str = format!(
             "appsrc name=src format=time is-live=true do-timestamp=true \
-             caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=96 ! \
-             rtph264depay ! \
+             caps=video/x-h264,stream-format=byte-stream,alignment=nal ! \
              h264parse ! \
              {} ! \
              videoconvert ! video/x-raw,format=RGB ! \
@@ -463,11 +543,125 @@ impl GstH264Decoder {
             appsink,
             decoder_name: decoder.to_string(),
             is_running: Arc::new(AtomicBool::new(true)),
+            fu_a_buffer: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Depayload RTP H.264 packet to get raw NAL units
+    /// Returns NAL units with Annex B start codes (00 00 00 01)
+    fn depayload_rtp(&self, data: &[u8]) -> Result<Vec<u8>> {
+        if data.len() < 12 {
+            return Err(anyhow!("RTP packet too small"));
+        }
+
+        // Parse RTP header
+        let extension = (data[0] >> 4) & 0x1;
+        let cc = data[0] & 0xf;
+
+        // Calculate payload offset: 12 + (cc * 4) + extension_length
+        let mut payload_offset = 12 + (cc as usize * 4);
+        if extension == 1 && data.len() > payload_offset + 4 {
+            // Extension header: 2 bytes profile + 2 bytes length (in 32-bit words)
+            let ext_len = u16::from_be_bytes([data[payload_offset + 2], data[payload_offset + 3]]) as usize;
+            payload_offset += 4 + (ext_len * 4);
+        }
+
+        if payload_offset >= data.len() {
+            return Err(anyhow!("RTP payload offset beyond packet length"));
+        }
+
+        let payload = &data[payload_offset..];
+        if payload.is_empty() {
+            return Err(anyhow!("Empty RTP payload"));
+        }
+
+        // Get NAL unit type from first byte of payload
+        let nal_header = payload[0];
+        let nal_type = nal_header & 0x1f;
+
+        match nal_type {
+            // Single NAL unit (types 1-23): pass through with start code
+            1..=23 => {
+                let mut result = vec![0x00, 0x00, 0x00, 0x01];
+                result.extend_from_slice(payload);
+                Ok(result)
+            }
+
+            // STAP-A (type 24): Aggregated NAL units
+            24 => {
+                let mut result = Vec::new();
+                let mut offset = 1; // Skip STAP-A header
+
+                while offset + 2 <= payload.len() {
+                    let nal_size = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
+                    offset += 2;
+
+                    if offset + nal_size > payload.len() {
+                        break;
+                    }
+
+                    // Add start code and NAL unit
+                    result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                    result.extend_from_slice(&payload[offset..offset + nal_size]);
+                    offset += nal_size;
+                }
+
+                if result.is_empty() {
+                    return Err(anyhow!("Empty STAP-A packet"));
+                }
+
+                Ok(result)
+            }
+
+            // FU-A (type 28): Fragmented NAL unit
+            28 => {
+                if payload.len() < 2 {
+                    return Err(anyhow!("FU-A packet too small"));
+                }
+
+                let fu_header = payload[1];
+                let start_bit = (fu_header >> 7) & 0x1;
+                let end_bit = (fu_header >> 6) & 0x1;
+                let original_nal_type = fu_header & 0x1f;
+
+                // Reconstruct NAL header: F and NRI from FU indicator, type from FU header
+                let reconstructed_nal_header = (nal_header & 0xe0) | original_nal_type;
+
+                let mut fu_buffer = self.fu_a_buffer.lock().map_err(|e| anyhow!("FU-A buffer lock error: {}", e))?;
+
+                if start_bit == 1 {
+                    // Start of fragmented NAL unit
+                    fu_buffer.clear();
+                    fu_buffer.push(reconstructed_nal_header);
+                    fu_buffer.extend_from_slice(&payload[2..]);
+                } else {
+                    // Continuation of fragmented NAL unit
+                    fu_buffer.extend_from_slice(&payload[2..]);
+                }
+
+                if end_bit == 1 {
+                    // End of fragmented NAL unit - output the complete NAL
+                    let mut result = vec![0x00, 0x00, 0x00, 0x01];
+                    result.append(&mut *fu_buffer);
+                    Ok(result)
+                } else {
+                    // Not complete yet, return empty
+                    Ok(Vec::new())
+                }
+            }
+
+            // Other types (STAP-B, MTAP16, MTAP24, FU-B) are rarely used
+            _ => {
+                Err(anyhow!("Unsupported RTP NAL unit type: {}", nal_type))
+            }
+        }
     }
 
     /// Decode H.264 RTP data to an RGB frame
     pub fn decode(&self, data: &[u8]) -> Result<Option<VideoFrame>> {
+        static DECODE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = DECODE_COUNT.fetch_add(1, Ordering::SeqCst);
+
         if !self.is_running.load(Ordering::SeqCst) {
             return Err(anyhow!("Decoder not running"));
         }
@@ -476,14 +670,97 @@ impl GstH264Decoder {
             return Ok(None);
         }
 
-        let mut buffer = gst::Buffer::with_size(data.len())?;
+        // Log first few packets with RTP header analysis for debugging
+        if count < 10 {
+            if data.len() >= 12 {
+                let version = (data[0] >> 6) & 0x3;
+                let padding = (data[0] >> 5) & 0x1;
+                let extension = (data[0] >> 4) & 0x1;
+                let cc = data[0] & 0xf;
+                let marker = (data[1] >> 7) & 0x1;
+                let payload_type = data[1] & 0x7f;
+                let seq = u16::from_be_bytes([data[2], data[3]]);
+
+                // Calculate payload offset: 12 + (cc * 4) + extension_length
+                let mut payload_offset = 12 + (cc as usize * 4);
+                if extension == 1 && data.len() > payload_offset + 4 {
+                    // Extension header: 2 bytes profile + 2 bytes length (in 32-bit words)
+                    let ext_len = u16::from_be_bytes([data[payload_offset + 2], data[payload_offset + 3]]) as usize;
+                    payload_offset += 4 + (ext_len * 4);
+                }
+
+                let nal_type = if data.len() > payload_offset {
+                    data[payload_offset] & 0x1f
+                } else {
+                    0
+                };
+
+                tracing::info!(
+                    "RTP packet #{}: {} bytes, v={} p={} x={} cc={} m={} pt={} seq={}, payload_offset={}, NAL_type={}",
+                    count, data.len(), version, padding, extension, cc, marker, payload_type, seq, payload_offset, nal_type
+                );
+
+                // Log first few bytes of payload
+                if data.len() > payload_offset {
+                    let payload_preview = &data[payload_offset..data.len().min(payload_offset + 10)];
+                    tracing::info!("  Payload preview: {:02x?}", payload_preview);
+                }
+            } else {
+                tracing::warn!("RTP packet #{} too small: {} bytes", count, data.len());
+            }
+        }
+
+        // Depayload RTP to get raw H.264 NAL units
+        let nal_data = match self.depayload_rtp(data) {
+            Ok(d) => d,
+            Err(e) => {
+                // Log depayload errors for first few packets
+                if count < 20 {
+                    tracing::warn!("RTP depayload error #{}: {}", count, e);
+                }
+                return Ok(None);
+            }
+        };
+
+        // Skip if depayload returned empty (e.g., middle of FU-A fragment)
+        if nal_data.is_empty() {
+            return Ok(None);
+        }
+
+        if count < 10 {
+            tracing::info!("Depayloaded NAL data: {} bytes, first 8: {:02x?}",
+                nal_data.len(), &nal_data[..nal_data.len().min(8)]);
+        }
+
+        let mut buffer = gst::Buffer::with_size(nal_data.len())?;
         {
             let buffer_ref = buffer.get_mut().ok_or_else(|| anyhow!("Failed to get buffer mut"))?;
             let mut map = buffer_ref.map_writable()?;
-            map.copy_from_slice(data);
+            map.copy_from_slice(&nal_data);
         }
 
-        self.appsrc.push_buffer(buffer)?;
+        if let Err(e) = self.appsrc.push_buffer(buffer) {
+            tracing::warn!("Failed to push buffer to decoder: {}", e);
+            return Err(anyhow!("Failed to push buffer: {}", e));
+        }
+
+        // Check for pipeline errors
+        if let Some(bus) = self.pipeline.bus() {
+            while let Some(msg) = bus.pop() {
+                use gst::MessageView;
+                match msg.view() {
+                    MessageView::Error(err) => {
+                        tracing::error!("Decoder pipeline error: {} ({:?})", err.error(), err.debug());
+                    }
+                    MessageView::Warning(warn) => {
+                        if count < 10 {
+                            tracing::warn!("Decoder pipeline warning: {} ({:?})", warn.error(), warn.debug());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(10)) {
             Some(sample) => {
@@ -497,9 +774,15 @@ impl GstH264Decoder {
                 let map = buffer.map_readable()?;
                 let data = map.as_slice().to_vec();
 
+                tracing::info!("Decoder produced frame: {}x{}", width, height);
                 Ok(Some(VideoFrame { width, height, data }))
             }
-            None => Ok(None),
+            None => {
+                if count < 10 || count % 100 == 0 {
+                    tracing::debug!("Decoder #{}: no output yet (buffering)", count);
+                }
+                Ok(None)
+            }
         }
     }
 

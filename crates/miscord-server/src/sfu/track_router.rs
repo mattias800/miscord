@@ -1,17 +1,15 @@
-//! Track Router for RTP forwarding with SSRC rewriting
+//! Track Router for RTP forwarding
 //!
 //! Routes RTP packets from a publisher's track to all subscribers.
-//! Uses TrackLocalStaticSample to generate proper SSRCs for each subscriber.
+//! Uses TrackLocalStaticRTP for direct RTP forwarding to preserve H.264 packetization.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use webrtc::media::Sample;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use webrtc::track::track_local::TrackLocal;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::track::track_local::TrackLocalWriter;
 use webrtc::track::track_remote::TrackRemote;
 
 use miscord_protocol::TrackType;
@@ -26,8 +24,8 @@ pub struct TrackRouter {
     track_id: String,
     /// Type of track (webcam or screen)
     track_type: TrackType,
-    /// Local tracks for each subscriber (using TrackLocalStaticSample for proper SSRC)
-    subscriber_tracks: RwLock<HashMap<Uuid, Arc<TrackLocalStaticSample>>>,
+    /// Local tracks for each subscriber (using TrackLocalStaticRTP for direct forwarding)
+    subscriber_tracks: RwLock<HashMap<Uuid, Arc<TrackLocalStaticRTP>>>,
     /// Whether the router is active
     active: Arc<RwLock<bool>>,
 }
@@ -71,8 +69,8 @@ impl TrackRouter {
     }
 
     /// Start the forwarding loop
-    /// This reads RTP packets from the source and writes them as samples to all subscribers
-    /// Using samples instead of raw RTP ensures proper SSRC generation for each subscriber
+    /// This reads RTP packets from the source and forwards them directly to all subscribers
+    /// Using direct RTP forwarding preserves H.264 packetization (FU-A fragmentation)
     pub async fn start_forwarding(self: Arc<Self>) {
         tracing::info!(
             "Starting RTP forwarding for track {} from user {}",
@@ -81,8 +79,6 @@ impl TrackRouter {
         );
 
         let mut packet_count = 0u64;
-        // Estimate frame duration based on typical video framerate (30fps = ~33ms)
-        let frame_duration = Duration::from_millis(33);
 
         loop {
             // Check if still active (less frequently to reduce lock contention)
@@ -99,29 +95,24 @@ impl TrackRouter {
                     // Log every 100 packets
                     if packet_count % 100 == 1 {
                         tracing::info!(
-                            "Forwarding RTP packet {} from {} (payload: {} bytes)",
+                            "Forwarding RTP packet {} from {} (payload: {} bytes, seq: {}, ts: {})",
                             packet_count,
                             self.publisher_id,
-                            rtp_packet.payload.len()
+                            rtp_packet.payload.len(),
+                            rtp_packet.header.sequence_number,
+                            rtp_packet.header.timestamp
                         );
                     }
 
-                    // Create a sample from the RTP payload
-                    // This allows TrackLocalStaticSample to generate proper RTP with correct SSRCs
-                    let sample = Sample {
-                        data: rtp_packet.payload.clone(),
-                        duration: frame_duration,
-                        ..Default::default()
-                    };
-
-                    // Forward to all subscribers as samples
+                    // Forward the complete RTP packet to all subscribers
+                    // This preserves H.264 FU-A fragmentation headers
                     let subscribers = self.subscriber_tracks.read().await;
                     let subscriber_count = subscribers.len();
 
                     for (subscriber_id, local_track) in subscribers.iter() {
-                        if let Err(e) = local_track.write_sample(&sample).await {
+                        if let Err(e) = local_track.write_rtp(&rtp_packet).await {
                             tracing::warn!(
-                                "Failed to forward sample to subscriber {}: {}",
+                                "Failed to forward RTP to subscriber {}: {}",
                                 subscriber_id,
                                 e
                             );
@@ -148,15 +139,15 @@ impl TrackRouter {
         *self.active.write().await = false;
     }
 
-    /// Add a subscriber to receive forwarded samples
-    pub async fn add_subscriber(&self, subscriber_id: Uuid) -> Arc<TrackLocalStaticSample> {
+    /// Add a subscriber to receive forwarded RTP packets
+    pub async fn add_subscriber(&self, subscriber_id: Uuid) -> Arc<TrackLocalStaticRTP> {
         // Create a local track for this subscriber with the same codec as source
         let codec = self.source_track.codec();
 
         // Stream ID format: stream-{user_id}-{track_type}
         // This allows clients to identify both the publisher and the track type
-        // Using TrackLocalStaticSample ensures proper SSRC generation for each subscriber
-        let local_track = Arc::new(TrackLocalStaticSample::new(
+        // Using TrackLocalStaticRTP for direct RTP forwarding preserves H.264 packetization
+        let local_track = Arc::new(TrackLocalStaticRTP::new(
             codec.capability.clone(),
             format!("{}-{}", self.track_id, subscriber_id),
             format!("stream-{}-{}", self.publisher_id, self.track_type),

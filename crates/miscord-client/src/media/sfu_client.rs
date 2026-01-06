@@ -231,14 +231,15 @@ impl SfuClient {
         use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
         use webrtc::peer_connection::signaling_state::RTCSignalingState;
 
-        // Log the incoming SDP for debugging
+        // Log the incoming SDP for debugging - show all m= lines
         tracing::info!("Received renegotiation SDP, length: {}", sdp.len());
-        // Log first part of SDP to see media lines
-        for line in sdp.lines().take(30) {
-            if line.starts_with("m=") || line.starts_with("a=mid") || line.starts_with("a=msid") || line.starts_with("a=ssrc") {
-                tracing::info!("SDP line: {}", line);
-            }
+        let m_lines: Vec<&str> = sdp.lines()
+            .filter(|l| l.starts_with("m=") || l.starts_with("a=mid") || l.starts_with("a=msid") || l.starts_with("a=sendrecv") || l.starts_with("a=recvonly") || l.starts_with("a=sendonly"))
+            .collect();
+        for line in &m_lines {
+            tracing::info!("Renegotiation SDP: {}", line);
         }
+        tracing::info!("SDP contains {} m= lines", m_lines.iter().filter(|l| l.starts_with("m=")).count());
 
         let pc_guard = self.peer_connection.read().await;
         let pc = pc_guard
@@ -266,13 +267,85 @@ impl SfuClient {
 
         tracing::info!("Processing renegotiation in stable state");
 
+        // Re-register on_track callback before processing renegotiation
+        // webrtc-rs may not fire on_track for new tracks during renegotiation
+        // unless the callback is re-registered
+        let remote_frames_callback = self.remote_frames.clone();
+        tracing::info!("Re-registering on_track callback for renegotiation");
+        pc.on_track(Box::new(move |track, _receiver, _transceiver| {
+            tracing::info!(
+                "on_track FIRED during renegotiation! Track ID: {}, Stream ID: {}, Kind: {:?}",
+                track.id(),
+                track.stream_id(),
+                track.kind()
+            );
+            let frames = remote_frames_callback.clone();
+            Box::pin(async move {
+                handle_remote_track(track, frames).await;
+            })
+        }));
+
         let offer = RTCSessionDescription::offer(sdp)?;
         pc.set_remote_description(offer).await?;
-        tracing::info!("Remote description set, on_track should have fired for new tracks");
+        tracing::info!("Remote description set successfully");
 
         // Create answer
         let answer = pc.create_answer(None).await?;
         pc.set_local_description(answer.clone()).await?;
+
+        // Workaround: on_track may not fire during renegotiation in webrtc-rs
+        // Poll transceivers to find new remote tracks manually
+        let remote_frames = self.remote_frames.clone();
+        let transceivers = pc.get_transceivers().await;
+        tracing::info!("Checking {} transceivers for new remote tracks", transceivers.len());
+
+        for (idx, transceiver) in transceivers.iter().enumerate() {
+            let receiver = transceiver.receiver().await;
+            let tracks = receiver.tracks().await;
+            let mid = transceiver.mid();
+            let direction = transceiver.direction();
+            let current_dir = transceiver.current_direction();
+
+            tracing::info!(
+                "Transceiver {}: mid={:?}, direction={:?}, current={:?}, tracks={}",
+                idx, mid, direction, current_dir, tracks.len()
+            );
+
+            for track in tracks {
+                let stream_id = track.stream_id().to_string();
+                let track_id = track.id().to_string();
+
+                tracing::info!(
+                    "  Track: id={}, stream_id={}, kind={:?}",
+                    track_id, stream_id, track.kind()
+                );
+
+                // Skip local tracks and tracks we're already handling
+                if stream_id.starts_with("stream-local") || track_id.is_empty() {
+                    continue;
+                }
+
+                // Parse user ID and track type from stream ID
+                if let Some((user_id, track_type)) = parse_stream_id(&stream_id) {
+                    // Check if we already have a frame for this track (meaning we're handling it)
+                    let already_handled = remote_frames.read().await.contains_key(&(user_id, track_type));
+
+                    if !already_handled {
+                        tracing::info!(
+                            "Found new remote track via transceiver polling: {} from stream {} (user: {}, type: {:?})",
+                            track_id, stream_id, user_id, track_type
+                        );
+
+                        // Spawn handler for this track
+                        let frames = remote_frames.clone();
+                        let track_clone = track.clone();
+                        tokio::spawn(async move {
+                            handle_remote_track(track_clone, frames).await;
+                        });
+                    }
+                }
+            }
+        }
 
         tracing::info!("SFU renegotiation processed, answer created");
         Ok(Some(answer.sdp))
@@ -525,6 +598,34 @@ impl SfuClient {
         };
 
         track.write_sample(&sample).await?;
+        Ok(())
+    }
+
+    /// Force the encoder to generate a keyframe (IDR frame)
+    /// This is called when a new subscriber joins and needs to start decoding
+    pub fn force_keyframe(&self, track_type: miscord_protocol::TrackType) -> Result<()> {
+        match track_type {
+            miscord_protocol::TrackType::Webcam => {
+                if let Ok(encoder_guard) = self.encoder.lock() {
+                    if let Some(encoder) = encoder_guard.as_ref() {
+                        encoder.force_keyframe()?;
+                        tracing::info!("Forced keyframe on webcam encoder");
+                    } else {
+                        tracing::debug!("No webcam encoder to force keyframe");
+                    }
+                }
+            }
+            miscord_protocol::TrackType::Screen => {
+                if let Ok(encoder_guard) = self.screen_encoder.lock() {
+                    if let Some(encoder) = encoder_guard.as_ref() {
+                        encoder.force_keyframe()?;
+                        tracing::info!("Forced keyframe on screen encoder");
+                    } else {
+                        tracing::debug!("No screen encoder to force keyframe");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

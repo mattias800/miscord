@@ -250,6 +250,10 @@ impl WebSocketClient {
                 tracing::info!("SFU renegotiation requested");
                 state.set_sfu_renegotiate(sdp).await;
             }
+            ServerMessage::SfuRequestKeyframe { track_type } => {
+                tracing::info!("Server requested keyframe for {:?} track", track_type);
+                state.sfu_request_keyframe(track_type).await;
+            }
             ServerMessage::Pong => {
                 // Heartbeat response
             }

@@ -1053,6 +1053,14 @@ impl VoiceChannelView {
                     }
                 });
             }
+
+            // Handle keyframe requests from server (when a new subscriber joins)
+            let keyframe_requests = runtime.block_on(state.take_pending_keyframe_requests());
+            for track_type in keyframe_requests {
+                if let Err(e) = sfu.force_keyframe(track_type) {
+                    tracing::warn!("Failed to force keyframe for {:?}: {}", track_type, e);
+                }
+            }
         }
     }
 
