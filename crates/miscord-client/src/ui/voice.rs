@@ -95,13 +95,22 @@ impl VoicePanel {
             if ui.button(screen_label).on_hover_text("Toggle Screen Share").clicked() {
                 let state = state.clone();
                 let network = network.clone();
-                runtime.spawn(async move {
-                    let new_screen = !is_screen;
-                    if network.update_voice_state(None, None, None, Some(new_screen)).await.is_ok() {
+                if is_screen {
+                    // Currently sharing - stop sharing
+                    runtime.spawn(async move {
+                        if network.update_voice_state(None, None, None, Some(false)).await.is_ok() {
+                            let mut s = state.write().await;
+                            s.is_screen_sharing = false;
+                            s.wants_screen_share = false;
+                        }
+                    });
+                } else {
+                    // Not sharing - open picker (don't update state yet)
+                    runtime.spawn(async move {
                         let mut s = state.write().await;
-                        s.is_screen_sharing = new_screen;
-                    }
-                });
+                        s.wants_screen_share = true;
+                    });
+                }
             }
 
             // Disconnect button

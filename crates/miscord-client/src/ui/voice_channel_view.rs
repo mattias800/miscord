@@ -4,18 +4,20 @@
 //! Integrates with SFU (Selective Forwarding Unit) for video streaming.
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::media::gst_video::GstVideoCapture;
+use crate::media::screen::{ScreenCapture, ScreenFrame};
 use crate::media::sfu_client::SfuClient;
 use crate::media::VoiceActivityDetector;
 use crate::network::NetworkClient;
 use crate::state::{AppState, VoiceParticipant};
 
+use super::screen_picker::{CaptureSource, CaptureSourceType, ScreenPickerDialog};
 use super::theme;
 
 /// Voice channel view showing participant grid
@@ -24,16 +26,30 @@ pub struct VoiceChannelView {
     video_capture: Option<GstVideoCapture>,
     /// Local video texture
     video_texture: Option<TextureHandle>,
+    /// Local screen capture
+    screen_capture: Option<ScreenCapture>,
+    /// Local screen texture (preview)
+    screen_texture: Option<TextureHandle>,
     /// Voice Activity Detector
     vad: Option<VoiceActivityDetector>,
-    /// Remote video textures (user_id -> texture)
+    /// Remote webcam textures (user_id -> texture)
     remote_textures: HashMap<Uuid, TextureHandle>,
+    /// Remote screen share textures (user_id -> texture)
+    remote_screen_textures: HashMap<Uuid, TextureHandle>,
+    /// Set of remote screen shares we're watching (subscribed to)
+    watching_screens: HashSet<Uuid>,
+    /// Pending subscription changes: (user_id, subscribe: true/false)
+    pending_screen_subscriptions: Vec<(Uuid, bool)>,
     /// SFU client for video streaming
     sfu_client: Option<SfuClient>,
     /// Channel for SFU ICE candidates
     ice_candidate_rx: Option<mpsc::UnboundedReceiver<crate::media::IceCandidate>>,
     /// Current voice channel ID for SFU
     sfu_channel_id: Option<Uuid>,
+    /// Screen picker dialog
+    screen_picker: ScreenPickerDialog,
+    /// FPS for screen sharing (configurable)
+    screen_share_fps: u32,
 }
 
 impl VoiceChannelView {
@@ -41,12 +57,105 @@ impl VoiceChannelView {
         Self {
             video_capture: None,
             video_texture: None,
+            screen_capture: None,
+            screen_texture: None,
             vad: None,
             remote_textures: HashMap::new(),
+            remote_screen_textures: HashMap::new(),
+            watching_screens: HashSet::new(),
+            pending_screen_subscriptions: Vec::new(),
             sfu_client: None,
             ice_candidate_rx: None,
             sfu_channel_id: None,
+            screen_picker: ScreenPickerDialog::new(),
+            screen_share_fps: 30, // Default to 30fps
         }
+    }
+
+    /// Open the screen picker dialog
+    pub fn open_screen_picker(&mut self) {
+        self.screen_picker.open();
+    }
+
+    /// Check if screen picker is open
+    pub fn is_screen_picker_open(&self) -> bool {
+        self.screen_picker.is_open()
+    }
+
+    /// Start screen sharing from a selected source with quality settings
+    pub fn start_screen_share(&mut self, source: CaptureSource) {
+        if self.screen_capture.is_some() {
+            tracing::warn!("Screen capture already active");
+            return;
+        }
+
+        let fps = source.framerate.value();
+        let max_width = source.resolution.width();
+        let max_height = source.resolution.height();
+
+        tracing::info!(
+            "Starting screen share: {}x{} @{} fps",
+            max_width, max_height, fps
+        );
+
+        match ScreenCapture::new_with_scaling(max_width, max_height) {
+            Ok(mut capture) => {
+                let result = match &source.source_type {
+                    CaptureSourceType::Monitor(monitor_id) => capture.start_monitor(*monitor_id, fps),
+                    CaptureSourceType::Window(_window_id) => {
+                        Err(anyhow::anyhow!("Window capture not supported yet"))
+                    }
+                };
+
+                match result {
+                    Ok(()) => {
+                        tracing::info!("Screen capture started at {}x{} @{} fps", max_width, max_height, fps);
+                        self.screen_capture = Some(capture);
+                        self.screen_share_fps = fps;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start screen capture: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create screen capture: {}", e);
+            }
+        }
+    }
+
+    /// Stop screen sharing
+    pub fn stop_screen_share(&mut self) {
+        if let Some(mut capture) = self.screen_capture.take() {
+            capture.stop();
+            tracing::info!("Screen capture stopped");
+        }
+        self.screen_texture = None;
+    }
+
+    /// Check if screen sharing is active
+    pub fn is_screen_sharing(&self) -> bool {
+        self.screen_capture.is_some()
+    }
+
+    /// Toggle watching a remote screen share
+    /// Queues the subscription change to be processed in show() where network is available
+    pub fn toggle_watch_screen(&mut self, user_id: Uuid) {
+        if self.watching_screens.contains(&user_id) {
+            self.watching_screens.remove(&user_id);
+            self.remote_screen_textures.remove(&user_id);
+            self.pending_screen_subscriptions.push((user_id, false)); // Unsubscribe
+            tracing::info!("Stopped watching screen share from {}", user_id);
+        } else {
+            self.watching_screens.insert(user_id);
+            self.pending_screen_subscriptions.push((user_id, true)); // Subscribe
+            tracing::info!("Started watching screen share from {}", user_id);
+        }
+    }
+
+    /// Check if we're watching a specific user's screen
+    pub fn is_watching_screen(&self, user_id: Uuid) -> bool {
+        self.watching_screens.contains(&user_id)
     }
 
     /// Start local video capture
@@ -143,7 +252,7 @@ impl VoiceChannelView {
         }
 
         // Get voice state
-        let (channel_name, voice_channel_id, participants, current_user_id, is_video_enabled) =
+        let (channel_name, voice_channel_id, participants, current_user_id, is_video_enabled, is_screen_sharing_state, wants_screen_share) =
             runtime.block_on(async {
                 let s = state.read().await;
                 let voice_channel_id = s.voice_channel_id;
@@ -154,7 +263,9 @@ impl VoiceChannelView {
                 let participants: Vec<_> = s.voice_participants.values().cloned().collect();
                 let current_user_id = s.current_user.as_ref().map(|u| u.id);
                 let is_video = s.is_video_enabled;
-                (channel_name, voice_channel_id, participants, current_user_id, is_video)
+                let is_screen = s.is_screen_sharing;
+                let wants_screen = s.wants_screen_share;
+                (channel_name, voice_channel_id, participants, current_user_id, is_video, is_screen, wants_screen)
             });
 
         // Manage video capture based on state
@@ -165,12 +276,130 @@ impl VoiceChannelView {
             self.stop_video();
         }
 
-        // Check if any participant has video enabled (need SFU to receive their video)
-        let any_video_in_channel = participants.iter().any(|p| p.is_video_enabled);
-        let should_connect_sfu = is_video_enabled || any_video_in_channel;
+        // Handle screen picker dialog - user wants to start sharing
+        if wants_screen_share && !self.screen_picker.is_open() && !self.is_screen_sharing() {
+            self.open_screen_picker();
+        }
+
+        // Handle screen picker result
+        let picker_was_open = self.screen_picker.is_open();
+        if let Some(source) = self.screen_picker.show(ctx) {
+            // User selected a source - start screen capture with selected settings
+            self.start_screen_share(source);
+
+            // Update voice state on server since capture started
+            if self.is_screen_sharing() {
+                let state = state.clone();
+                let network = network.clone();
+                runtime.spawn(async move {
+                    if network.update_voice_state(None, None, None, Some(true)).await.is_ok() {
+                        let mut s = state.write().await;
+                        s.is_screen_sharing = true;
+                        s.wants_screen_share = false;
+                    }
+                });
+            }
+        }
+
+        // Clear wants_screen_share if picker was closed without selecting (cancelled)
+        if picker_was_open && !self.screen_picker.is_open() && !self.is_screen_sharing() {
+            let state = state.clone();
+            runtime.spawn(async move {
+                let mut s = state.write().await;
+                s.wants_screen_share = false;
+            });
+        }
+
+        // Stop screen sharing if state says to stop (but not if we just started - wait for state to sync)
+        // Don't stop if wants_screen_share is true (user just clicked share, state hasn't synced yet)
+        if !is_screen_sharing_state && !wants_screen_share && self.is_screen_sharing() {
+            self.stop_screen_share();
+        }
+
+        // Update local screen texture and send to SFU
+        if let Some(capture) = &self.screen_capture {
+            if let Some(screen_frame) = capture.get_frame() {
+                let image = ColorImage::from_rgb(
+                    [screen_frame.width as usize, screen_frame.height as usize],
+                    &screen_frame.data,
+                );
+
+                if let Some(texture) = &mut self.screen_texture {
+                    texture.set(image, TextureOptions::default());
+                } else {
+                    self.screen_texture = Some(ctx.load_texture(
+                        "voice_local_screen",
+                        image,
+                        TextureOptions::default(),
+                    ));
+                }
+
+                // Send screen frame to SFU if connected
+                if let Some(sfu) = &self.sfu_client {
+                    let sfu_clone = sfu.clone();
+                    let video_frame = crate::media::gst_video::VideoFrame {
+                        width: screen_frame.width,
+                        height: screen_frame.height,
+                        data: screen_frame.data.clone(),
+                    };
+                    let fps = self.screen_share_fps;
+                    runtime.spawn(async move {
+                        if let Err(e) = sfu_clone.send_screen_frame(&video_frame, fps).await {
+                            tracing::debug!("Failed to send screen frame to SFU: {}", e);
+                        }
+                    });
+                }
+            }
+        }
+
+        // Check if any participant has video or screen sharing enabled (need SFU)
+        let any_video_in_channel = participants.iter().any(|p| p.is_video_enabled || p.is_screen_sharing);
+        let should_connect_sfu = is_video_enabled || is_screen_sharing_state || self.is_screen_sharing() || any_video_in_channel;
 
         // Manage SFU connection for video streaming
         self.update_sfu_connection(state, network, runtime, voice_channel_id, should_connect_sfu);
+
+        // Start SFU screen track if local capture is active but SFU track isn't
+        if self.is_screen_sharing() {
+            if let Some(sfu) = &self.sfu_client {
+                // Check if SFU screen track needs to be created
+                let sfu_clone = sfu.clone();
+                let needs_screen_track = runtime.block_on(async {
+                    !sfu_clone.is_screen_sharing().await
+                });
+
+                if needs_screen_track {
+                    let sfu_clone = sfu.clone();
+                    let network_clone = network.clone();
+                    let state_clone = state.clone();
+                    runtime.spawn(async move {
+                        // Create SFU screen track
+                        if let Err(e) = sfu_clone.start_screen_share().await {
+                            tracing::error!("Failed to start SFU screen share: {}", e);
+                            return;
+                        }
+                        tracing::info!("SFU screen share track created");
+
+                        // Trigger renegotiation by creating new offer
+                        match sfu_clone.create_offer().await {
+                            Ok(offer_sdp) => {
+                                let channel_id = {
+                                    let s = state_clone.read().await;
+                                    s.voice_channel_id
+                                };
+                                if let Some(channel_id) = channel_id {
+                                    network_clone.send_sfu_offer(channel_id, offer_sdp).await;
+                                    tracing::info!("Sent renegotiation offer for screen share");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create offer for screen share: {}", e);
+                            }
+                        }
+                    });
+                }
+            }
+        }
 
         // Process pending ICE candidates from SFU client
         self.process_ice_candidates(network, runtime);
@@ -178,7 +407,10 @@ impl VoiceChannelView {
         // Handle SFU signaling messages from server
         self.handle_sfu_signaling(state, network, runtime);
 
-        // Update remote video textures
+        // Process pending screen subscription changes
+        self.process_pending_subscriptions(network, runtime);
+
+        // Update remote video textures (webcam and screen)
         self.update_remote_textures(ctx, runtime);
 
         // Request repaint for continuous updates (~30 FPS)
@@ -211,79 +443,85 @@ impl VoiceChannelView {
                 current_user_id,
                 local_speaking,
                 is_video_enabled,
+                is_screen_sharing_state,
                 available_size,
             );
         });
     }
 
     fn render_participant_grid(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         participants: &[VoiceParticipant],
         current_user_id: Option<Uuid>,
         local_speaking: bool,
         local_video_enabled: bool,
+        local_screen_enabled: bool,
         available_size: Vec2,
     ) {
-        let total_participants = participants.len().max(1);
+        // Collect all tiles to render
+        let mut tiles: Vec<(VoiceParticipant, bool, bool, bool, bool)> = Vec::new(); // (participant, is_self, is_speaking, has_video, is_screen_tile)
 
-        // Calculate grid dimensions (Discord-like layout)
-        let (cols, rows) = Self::calculate_grid(total_participants);
+        for participant in participants {
+            let is_self = current_user_id == Some(participant.user_id);
+            let is_speaking = if is_self {
+                local_speaking
+            } else {
+                participant.is_speaking
+            };
+            let has_video = if is_self {
+                local_video_enabled
+            } else {
+                participant.is_video_enabled
+            };
+            let has_screen = if is_self {
+                local_screen_enabled
+            } else {
+                participant.is_screen_sharing
+            };
 
-        // Calculate tile size with padding
+            // Add webcam/avatar tile
+            tiles.push((participant.clone(), is_self, is_speaking, has_video, false));
+
+            // Add screen share tile if sharing
+            if has_screen {
+                tiles.push((participant.clone(), is_self, is_speaking, has_video, true));
+            }
+        }
+
+        let total_tiles = tiles.len().max(1);
+
+        // Calculate how many columns can fit based on available width
         let padding = 16.0;
         let gap = 12.0;
+        let min_tile_width = 250.0;
+        let max_tile_width = 400.0;
+
+        // Calculate max columns that can fit
+        let max_cols = ((available_size.x - padding * 2.0 + gap) / (min_tile_width + gap))
+            .floor()
+            .max(1.0) as usize;
+
+        // Use Discord-like grid calculation but cap at max_cols
+        let (mut cols, _rows) = Self::calculate_grid(total_tiles);
+        cols = cols.min(max_cols);
+
+        // Calculate tile size
         let tile_width = ((available_size.x - padding * 2.0 - gap * (cols as f32 - 1.0)) / cols as f32)
-            .min(400.0)
-            .max(200.0);
-        let tile_height = ((available_size.y - padding * 2.0 - gap * (rows as f32 - 1.0)) / rows as f32)
-            .min(300.0)
-            .max(150.0);
+            .min(max_tile_width)
+            .max(min_tile_width);
+        let tile_height = (tile_width * 0.75).min(300.0).max(150.0); // 4:3 aspect ratio
 
-        ui.horizontal(|ui| {
-            ui.add_space(padding);
-            ui.vertical(|ui| {
-                let mut count = 0;
-                let mut row_ui = ui.horizontal(|_| {});
+        let tile_size = Vec2::new(tile_width, tile_height);
 
-                for participant in participants {
-                    if count > 0 && count % cols == 0 {
-                        // End current row, start new one
-                        row_ui = ui.horizontal(|_| {});
-                    }
-
-                    row_ui = ui.horizontal(|ui| {
-                        let is_self = current_user_id == Some(participant.user_id);
-                        let is_speaking = if is_self {
-                            local_speaking
-                        } else {
-                            participant.is_speaking
-                        };
-                        let has_video = if is_self {
-                            local_video_enabled
-                        } else {
-                            participant.is_video_enabled
-                        };
-
-                        self.render_participant_tile(
-                            ui,
-                            participant,
-                            is_speaking,
-                            has_video,
-                            is_self,
-                            Vec2::new(tile_width, tile_height),
-                        );
-
-                        if count % cols != cols - 1 {
-                            ui.add_space(gap);
-                        }
-                    });
-
-                    count += 1;
-                }
+        // Wrap in ScrollArea for scrollbar support
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(padding);
 
                 // If no participants, show a placeholder
-                if participants.is_empty() {
+                if tiles.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label(
                             egui::RichText::new("No one else is here")
@@ -291,9 +529,186 @@ impl VoiceChannelView {
                                 .size(16.0),
                         );
                     });
+                    return;
                 }
+
+                // Render tiles in a proper grid
+                let mut current_col = 0;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
+                    ui.set_min_width(available_size.x - padding * 2.0);
+
+                    for (participant, is_self, is_speaking, has_video, is_screen_tile) in &tiles {
+                        if *is_screen_tile {
+                            self.render_screen_tile(
+                                ui,
+                                participant,
+                                *is_self,
+                                tile_size,
+                            );
+                        } else {
+                            self.render_participant_tile(
+                                ui,
+                                participant,
+                                *is_speaking,
+                                *has_video,
+                                *is_self,
+                                tile_size,
+                            );
+                        }
+
+                        current_col += 1;
+                        if current_col >= cols {
+                            current_col = 0;
+                            ui.end_row();
+                        }
+                    }
+                });
+
+                ui.add_space(padding);
             });
-        });
+    }
+
+    /// Render a screen share tile for a participant
+    fn render_screen_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        participant: &VoiceParticipant,
+        is_self: bool,
+        size: Vec2,
+    ) {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let painter = ui.painter_at(rect);
+
+        // Background
+        painter.rect_filled(rect, 12.0, theme::BG_TERTIARY);
+
+        // Border (purple for screen share)
+        let border_color = Color32::from_rgb(138, 43, 226); // Purple
+        painter.rect_stroke(rect, 12.0, egui::Stroke::new(2.0, border_color));
+
+        let content_rect = rect.shrink(4.0);
+
+        if is_self {
+            // Show local screen capture preview
+            if let Some(texture) = &self.screen_texture {
+                let tex_size = texture.size_vec2();
+                let scale = (content_rect.width() / tex_size.x)
+                    .min(content_rect.height() / tex_size.y);
+                let video_size = tex_size * scale;
+                let video_rect = egui::Rect::from_center_size(content_rect.center(), video_size);
+
+                painter.image(
+                    texture.id(),
+                    video_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            } else {
+                // Screen capture starting...
+                painter.text(
+                    content_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "🖥️ Starting...",
+                    egui::FontId::proportional(16.0),
+                    theme::TEXT_MUTED,
+                );
+            }
+        } else {
+            // Remote screen share
+            let is_watching = self.watching_screens.contains(&participant.user_id);
+
+            if is_watching {
+                // Show remote screen if we have it
+                if let Some(texture) = self.remote_screen_textures.get(&participant.user_id) {
+                    let tex_size = texture.size_vec2();
+                    let scale = (content_rect.width() / tex_size.x)
+                        .min(content_rect.height() / tex_size.y);
+                    let video_size = tex_size * scale;
+                    let video_rect = egui::Rect::from_center_size(content_rect.center(), video_size);
+
+                    painter.image(
+                        texture.id(),
+                        video_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    // Subscribed but no frames yet
+                    painter.text(
+                        content_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🖥️ Loading...",
+                        egui::FontId::proportional(16.0),
+                        theme::TEXT_MUTED,
+                    );
+                }
+
+                // Click to stop watching
+                if response.clicked() {
+                    self.toggle_watch_screen(participant.user_id);
+                }
+            } else {
+                // Not watching - show "Watch" prompt
+                painter.text(
+                    content_rect.center() - Vec2::new(0.0, 15.0),
+                    egui::Align2::CENTER_CENTER,
+                    "🖥️ Screen Share",
+                    egui::FontId::proportional(14.0),
+                    theme::TEXT_MUTED,
+                );
+
+                // Draw a "Watch" button area
+                let button_rect = egui::Rect::from_center_size(
+                    content_rect.center() + Vec2::new(0.0, 20.0),
+                    Vec2::new(80.0, 28.0),
+                );
+                let button_color = if response.hovered() {
+                    Color32::from_rgb(88, 101, 242) // Discord blurple
+                } else {
+                    Color32::from_rgb(71, 82, 196)
+                };
+                painter.rect_filled(button_rect, 4.0, button_color);
+                painter.text(
+                    button_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Watch",
+                    egui::FontId::proportional(13.0),
+                    Color32::WHITE,
+                );
+
+                // Click to start watching
+                if response.clicked() {
+                    self.toggle_watch_screen(participant.user_id);
+                }
+            }
+        }
+
+        // Label at bottom
+        let overlay_height = 28.0;
+        let name_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, rect.max.y - overlay_height),
+            rect.max,
+        );
+        painter.rect_filled(
+            name_rect,
+            egui::Rounding {
+                nw: 0.0,
+                ne: 0.0,
+                sw: 12.0,
+                se: 12.0,
+            },
+            Color32::from_black_alpha(200),
+        );
+
+        let label = format!("{}'s screen", participant.username);
+        painter.text(
+            name_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &label,
+            egui::FontId::proportional(12.0),
+            theme::TEXT_MUTED,
+        );
     }
 
     fn calculate_grid(count: usize) -> (usize, usize) {
@@ -561,6 +976,24 @@ impl VoiceChannelView {
         }
     }
 
+    /// Process pending screen subscription changes
+    fn process_pending_subscriptions(&mut self, network: &NetworkClient, runtime: &tokio::runtime::Runtime) {
+        // Drain all pending subscription changes
+        let pending: Vec<_> = self.pending_screen_subscriptions.drain(..).collect();
+        for (user_id, subscribe) in pending {
+            let network = network.clone();
+            if subscribe {
+                runtime.spawn(async move {
+                    network.subscribe_screen_track(user_id).await;
+                });
+            } else {
+                runtime.spawn(async move {
+                    network.unsubscribe_screen_track(user_id).await;
+                });
+            }
+        }
+    }
+
     /// Handle SFU signaling messages from the server
     fn handle_sfu_signaling(
         &mut self,
@@ -623,13 +1056,14 @@ impl VoiceChannelView {
         }
     }
 
-    /// Update remote video textures from SFU
+    /// Update remote video textures from SFU (webcam and screen)
     fn update_remote_textures(&mut self, ctx: &egui::Context, runtime: &tokio::runtime::Runtime) {
         if let Some(sfu) = &self.sfu_client {
+            // Update webcam textures
             let remote_users = runtime.block_on(sfu.get_remote_users());
 
             for user_id in remote_users {
-                if let Some(frame) = runtime.block_on(sfu.get_remote_frame(user_id)) {
+                if let Some(frame) = runtime.block_on(sfu.get_remote_webcam_frame(user_id)) {
                     if frame.data.len() >= (frame.width * frame.height * 3) as usize {
                         let image = ColorImage::from_rgb(
                             [frame.width as usize, frame.height as usize],
@@ -645,6 +1079,29 @@ impl VoiceChannelView {
                                 TextureOptions::default(),
                             );
                             self.remote_textures.insert(user_id, texture);
+                        }
+                    }
+                }
+            }
+
+            // Update screen share textures for users we're watching
+            for &user_id in &self.watching_screens.clone() {
+                if let Some(frame) = runtime.block_on(sfu.get_remote_screen_frame(user_id)) {
+                    if frame.data.len() >= (frame.width * frame.height * 3) as usize {
+                        let image = ColorImage::from_rgb(
+                            [frame.width as usize, frame.height as usize],
+                            &frame.data,
+                        );
+
+                        if let Some(texture) = self.remote_screen_textures.get_mut(&user_id) {
+                            texture.set(image, TextureOptions::default());
+                        } else {
+                            let texture = ctx.load_texture(
+                                format!("remote_screen_{}", user_id),
+                                image,
+                                TextureOptions::default(),
+                            );
+                            self.remote_screen_textures.insert(user_id, texture);
                         }
                     }
                 }

@@ -3,6 +3,41 @@ use uuid::Uuid;
 
 use crate::types::{MessageData, VoiceStateData};
 
+/// Type of video track for SFU
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackType {
+    Webcam,
+    Screen,
+}
+
+impl Default for TrackType {
+    fn default() -> Self {
+        TrackType::Webcam
+    }
+}
+
+impl std::fmt::Display for TrackType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrackType::Webcam => write!(f, "webcam"),
+            TrackType::Screen => write!(f, "screen"),
+        }
+    }
+}
+
+impl std::str::FromStr for TrackType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "webcam" => Ok(TrackType::Webcam),
+            "screen" => Ok(TrackType::Screen),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Messages sent from client to server via WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -46,6 +81,12 @@ pub enum ClientMessage {
         sdp_mid: Option<String>,
         sdp_mline_index: Option<u16>,
     },
+
+    /// SFU: Subscribe to a user's screen share track
+    SfuSubscribeTrack { user_id: Uuid, track_type: TrackType },
+
+    /// SFU: Unsubscribe from a user's screen share track
+    SfuUnsubscribeTrack { user_id: Uuid, track_type: TrackType },
 }
 
 /// Messages sent from server to client via WebSocket
@@ -133,6 +174,8 @@ pub enum ServerMessage {
         user_id: Uuid,
         track_id: String,
         kind: String,
+        #[serde(default)]
+        track_type: TrackType,
     },
 
     /// SFU: A video track was removed (user stopped streaming)

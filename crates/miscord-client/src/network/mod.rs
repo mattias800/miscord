@@ -383,6 +383,20 @@ impl NetworkClient {
             client.send_sfu_ice_candidate(candidate, sdp_mid, sdp_mline_index).await;
         }
     }
+
+    /// Subscribe to a user's screen share track via WebSocket
+    pub async fn subscribe_screen_track(&self, user_id: Uuid) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.subscribe_screen_track(user_id).await;
+        }
+    }
+
+    /// Unsubscribe from a user's screen share track via WebSocket
+    pub async fn unsubscribe_screen_track(&self, user_id: Uuid) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.unsubscribe_screen_track(user_id).await;
+        }
+    }
 }
 
 /// ICE server configuration for WebRTC

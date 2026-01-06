@@ -10,9 +10,10 @@ default-run = "miscord"
 name = "miscord"
 path = "src/main.rs"
 
-[[bin]]
-name = "sfu-test"
-path = "src/bin/sfu_test.rs"
+# NOTE: sfu-test binary temporarily disabled - API has changed
+# [[bin]]
+# name = "sfu-test"
+# path = "src/bin/sfu_test.rs"
 
 [dependencies]
 # Workspace dependencies
@@ -69,7 +70,7 @@ futures = "0.3"
 # Settings persistence
 dirs = "5"
 
-# Screen capture (cross-platform) - TODO: Fix type annotation issues
+# Screen capture - xcap has compilation issues, using GStreamer instead
 # xcap = "0.0.14"
 
 [target.'cfg(target_os = "windows")'.dependencies]

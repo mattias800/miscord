@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use miscord_protocol::{ClientMessage, ServerMessage};
+use miscord_protocol::{ClientMessage, ServerMessage, TrackType};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
@@ -231,14 +231,16 @@ impl WebSocketClient {
                 user_id,
                 track_id,
                 kind,
+                track_type,
             } => {
                 tracing::info!(
-                    "SFU track added: user={}, track={}, kind={}",
+                    "SFU track added: user={}, track={}, kind={}, type={:?}",
                     user_id,
                     track_id,
-                    kind
+                    kind,
+                    track_type
                 );
-                state.sfu_track_added(user_id, track_id, kind).await;
+                state.sfu_track_added(user_id, track_id, kind, track_type).await;
             }
             ServerMessage::SfuTrackRemoved { user_id, track_id } => {
                 tracing::info!("SFU track removed: user={}, track={}", user_id, track_id);
@@ -343,6 +345,30 @@ impl WebSocketClient {
                 candidate,
                 sdp_mid,
                 sdp_mline_index,
+            })
+            .await;
+    }
+
+    /// Subscribe to a user's screen share track
+    pub async fn subscribe_screen_track(&self, user_id: Uuid) {
+        tracing::info!("Subscribing to screen share from user {}", user_id);
+        let _ = self
+            .sender
+            .send(ClientMessage::SfuSubscribeTrack {
+                user_id,
+                track_type: TrackType::Screen,
+            })
+            .await;
+    }
+
+    /// Unsubscribe from a user's screen share track
+    pub async fn unsubscribe_screen_track(&self, user_id: Uuid) {
+        tracing::info!("Unsubscribing from screen share from user {}", user_id);
+        let _ = self
+            .sender
+            .send(ClientMessage::SfuUnsubscribeTrack {
+                user_id,
+                track_type: TrackType::Screen,
             })
             .await;
     }

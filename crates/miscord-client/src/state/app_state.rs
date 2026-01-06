@@ -45,6 +45,7 @@ pub struct AppStateInner {
     pub is_deafened: bool,
     pub is_video_enabled: bool,
     pub is_screen_sharing: bool,
+    pub wants_screen_share: bool, // Flag to open screen picker (before actual sharing starts)
     pub is_speaking: bool, // Local user speaking status
 
     // WebRTC signaling
@@ -98,6 +99,7 @@ impl Default for AppStateInner {
             is_deafened: false,
             is_video_enabled: false,
             is_screen_sharing: false,
+            wants_screen_share: false,
             is_speaking: false,
             pending_rtc_offers: Vec::new(),
             pending_rtc_answers: Vec::new(),
@@ -144,6 +146,7 @@ pub struct SfuIceCandidate {
 pub struct SfuTrackInfo {
     pub track_id: String,
     pub kind: String,
+    pub track_type: miscord_protocol::TrackType,
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +261,7 @@ impl AppState {
         state.is_deafened = false;
         state.is_video_enabled = false;
         state.is_screen_sharing = false;
+        state.wants_screen_share = false;
         state.is_speaking = false;
     }
 
@@ -419,13 +423,13 @@ impl AppState {
         std::mem::take(&mut state.pending_sfu_ice_candidates)
     }
 
-    pub async fn sfu_track_added(&self, user_id: Uuid, track_id: String, kind: String) {
+    pub async fn sfu_track_added(&self, user_id: Uuid, track_id: String, kind: String, track_type: miscord_protocol::TrackType) {
         let mut state = self.inner.write().await;
         state
             .sfu_tracks
             .entry(user_id)
             .or_default()
-            .push(SfuTrackInfo { track_id, kind });
+            .push(SfuTrackInfo { track_id, kind, track_type });
     }
 
     pub async fn sfu_track_removed(&self, user_id: Uuid, track_id: String) {

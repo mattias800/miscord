@@ -4,10 +4,12 @@
 
 use super::TrackRouter;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+use miscord_protocol::TrackType;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
@@ -27,6 +29,9 @@ pub struct VoiceChannelSession {
     pub peer_connections: RwLock<HashMap<Uuid, Arc<RTCPeerConnection>>>,
     /// Track routers per user (for their published tracks)
     pub track_routers: RwLock<HashMap<Uuid, Vec<Arc<TrackRouter>>>>,
+    /// Screen share subscriptions: screen_owner_id -> set of subscriber_ids
+    /// Users must explicitly subscribe to screen shares (bandwidth optimization)
+    screen_subscriptions: RwLock<HashMap<Uuid, HashSet<Uuid>>>,
 }
 
 impl VoiceChannelSession {
@@ -35,6 +40,7 @@ impl VoiceChannelSession {
             channel_id,
             peer_connections: RwLock::new(HashMap::new()),
             track_routers: RwLock::new(HashMap::new()),
+            screen_subscriptions: RwLock::new(HashMap::new()),
         }
     }
 
@@ -76,6 +82,86 @@ impl VoiceChannelSession {
             .remove(&user_id)
             .unwrap_or_default()
     }
+
+    /// Get track routers for a user filtered by track type
+    pub async fn get_user_routers_by_type(
+        &self,
+        user_id: Uuid,
+        track_type: TrackType,
+    ) -> Vec<Arc<TrackRouter>> {
+        self.track_routers
+            .read()
+            .await
+            .get(&user_id)
+            .map(|routers| {
+                routers
+                    .iter()
+                    .filter(|r| r.track_type() == track_type)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Subscribe a user to another user's screen share
+    pub async fn subscribe_to_screen(&self, subscriber_id: Uuid, screen_owner_id: Uuid) {
+        self.screen_subscriptions
+            .write()
+            .await
+            .entry(screen_owner_id)
+            .or_default()
+            .insert(subscriber_id);
+
+        tracing::info!(
+            "User {} subscribed to screen share from {}",
+            subscriber_id,
+            screen_owner_id
+        );
+    }
+
+    /// Unsubscribe a user from another user's screen share
+    pub async fn unsubscribe_from_screen(&self, subscriber_id: Uuid, screen_owner_id: Uuid) {
+        if let Some(subscribers) = self.screen_subscriptions.write().await.get_mut(&screen_owner_id)
+        {
+            subscribers.remove(&subscriber_id);
+            tracing::info!(
+                "User {} unsubscribed from screen share from {}",
+                subscriber_id,
+                screen_owner_id
+            );
+        }
+    }
+
+    /// Check if a user is subscribed to another user's screen share
+    pub async fn is_subscribed_to_screen(&self, subscriber_id: Uuid, screen_owner_id: Uuid) -> bool {
+        self.screen_subscriptions
+            .read()
+            .await
+            .get(&screen_owner_id)
+            .map(|subs| subs.contains(&subscriber_id))
+            .unwrap_or(false)
+    }
+
+    /// Get all users subscribed to a screen share
+    pub async fn get_screen_subscribers(&self, screen_owner_id: Uuid) -> HashSet<Uuid> {
+        self.screen_subscriptions
+            .read()
+            .await
+            .get(&screen_owner_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Remove all screen subscriptions for a user (when they leave)
+    pub async fn remove_user_screen_subscriptions(&self, user_id: Uuid) {
+        // Remove as screen owner
+        self.screen_subscriptions.write().await.remove(&user_id);
+
+        // Remove as subscriber from all screen shares
+        for subscribers in self.screen_subscriptions.write().await.values_mut() {
+            subscribers.remove(&user_id);
+        }
+    }
 }
 
 /// Global SFU session manager
@@ -91,17 +177,19 @@ pub struct SfuSessionManager {
 impl SfuSessionManager {
     /// Create a new SFU session manager
     pub fn new(stun_servers: Vec<String>, turn_servers: Vec<(String, String, String)>) -> Result<Self> {
-        // Create media engine with VP8 codec support
+        // Create media engine with H.264 codec support (hardware accelerated on clients)
         let mut media_engine = MediaEngine::default();
 
-        // Register VP8 codec for video
+        // Register H.264 codec for video
         media_engine.register_codec(
             RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
-                    mime_type: "video/VP8".to_string(),
+                    mime_type: "video/H264".to_string(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: String::new(),
+                    // Profile Level ID: Baseline profile, level 3.1 (720p30)
+                    // packetization-mode=1 enables NAL unit mode for efficient RTP
+                    sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string(),
                     rtcp_feedback: vec![],
                 },
                 payload_type: 96,
@@ -251,6 +339,9 @@ impl SfuSessionManager {
                     router.remove_subscriber(user_id).await;
                 }
             }
+
+            // Clean up screen share subscriptions
+            session.remove_user_screen_subscriptions(user_id).await;
 
             tracing::info!("Removed user {} from SFU session {}", user_id, channel_id);
         }

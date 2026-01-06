@@ -9,6 +9,8 @@ mod voice;
 mod voice_channel_view;
 mod markdown;
 mod settings;
+mod screen_picker;
 pub mod theme;
 
 pub use app::MiscordApp;
+pub use screen_picker::{ScreenPickerDialog, CaptureSource};
