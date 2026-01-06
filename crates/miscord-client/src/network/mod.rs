@@ -4,9 +4,21 @@ mod websocket;
 use crate::state::{AppState, LoginRequest, LoginResponse, RegisterRequest, RegisterResponse};
 use anyhow::Result;
 use miscord_protocol::{ChannelData, ChannelType, CommunityData, MessageData, UserData};
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Response from get_voice_participants API
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceParticipantResponse {
+    pub user_id: Uuid,
+    pub username: String,
+    pub self_muted: bool,
+    pub self_deafened: bool,
+    pub video_enabled: bool,
+    pub screen_sharing: bool,
+}
 
 #[derive(Clone)]
 pub struct NetworkClient {
@@ -244,6 +256,18 @@ impl NetworkClient {
 
         api::post_empty_void(
             &format!("{}/api/channels/{}/voice/join", server_url, channel_id),
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Get voice channel participants
+    pub async fn get_voice_participants(&self, channel_id: Uuid) -> Result<Vec<VoiceParticipantResponse>> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::get(
+            &format!("{}/api/channels/{}/voice/participants", server_url, channel_id),
             token.as_deref(),
         )
         .await

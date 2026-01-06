@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::media::audio::{list_input_devices, list_output_devices, AudioCapture, AudioPlayback, linear_to_db};
 use crate::media::gst_video::{GstVideoCapture, VideoDeviceInfo};
-use crate::state::AppState;
+use crate::state::{AppState, PersistentSettings};
 
 /// The settings view component
 pub struct SettingsView {
@@ -210,6 +210,23 @@ impl SettingsView {
         self.video_texture = None;
     }
 
+    /// Save current settings to disk
+    fn save_settings(&self, state: &AppState, runtime: &tokio::runtime::Runtime) {
+        let settings = runtime.block_on(async {
+            let s = state.read().await;
+            PersistentSettings {
+                input_device: s.selected_input_device.clone(),
+                output_device: s.selected_output_device.clone(),
+                video_device: s.selected_video_device,
+                input_gain_db: Some(s.input_gain_db),
+                gate_threshold_db: Some(s.gate_threshold_db),
+                gate_enabled: Some(s.gate_enabled),
+                loopback_enabled: Some(s.loopback_enabled),
+            }
+        });
+        settings.save();
+    }
+
     /// Render the settings view
     /// Returns true if the close button was pressed
     pub fn show(
@@ -335,10 +352,11 @@ impl SettingsView {
             });
         });
 
-        // Stop tests if closing
+        // Stop tests and save settings if closing
         if close_requested {
             self.stop_audio_test();
             self.stop_video_test();
+            self.save_settings(state, runtime);
         }
 
         close_requested

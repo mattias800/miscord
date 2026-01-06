@@ -139,11 +139,22 @@ impl ChannelService {
         Ok(state)
     }
 
-    pub async fn leave_voice(&self, user_id: Uuid) -> Result<()> {
+    pub async fn leave_voice(&self, user_id: Uuid) -> Result<Option<Uuid>> {
+        // Get the channel_id before deleting
+        let result = sqlx::query!(
+            "SELECT channel_id FROM voice_states WHERE user_id = $1",
+            user_id
+        )
+        .fetch_optional(&self.db)
+        .await?;
+
+        let channel_id = result.map(|r| r.channel_id);
+
         sqlx::query!("DELETE FROM voice_states WHERE user_id = $1", user_id)
             .execute(&self.db)
             .await?;
-        Ok(())
+
+        Ok(channel_id)
     }
 
     pub async fn get_voice_participants(&self, channel_id: Uuid) -> Result<Vec<VoiceState>> {

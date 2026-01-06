@@ -69,6 +69,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         // Voice routes
         .route("/api/channels/{id}/voice/join", post(channels::join_voice))
+        .route("/api/channels/{id}/voice/participants", get(channels::get_voice_participants))
         .route("/api/voice/leave", post(channels::leave_voice))
         .route("/api/voice/state", axum::routing::patch(channels::update_voice_state))
         // WebSocket endpoint

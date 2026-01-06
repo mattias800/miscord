@@ -140,7 +140,7 @@ impl WebSocketClient {
                 }
             }
             ServerMessage::VoiceStateUpdate {
-                channel_id,
+                channel_id: _,
                 user_id,
                 state: voice_state,
             } => {
@@ -150,6 +150,42 @@ impl WebSocketClient {
                     participant.is_deafened = voice_state.self_deafened;
                     participant.is_video_enabled = voice_state.video_enabled;
                     participant.is_screen_sharing = voice_state.screen_sharing;
+                }
+            }
+            ServerMessage::VoiceUserJoined { channel_id, user_id } => {
+                tracing::info!("User {} joined voice channel {}", user_id, channel_id);
+                let mut s = state.write().await;
+                // Only add if we're in the same channel
+                if s.voice_channel_id == Some(channel_id) {
+                    // Look up username from users or members
+                    let username = s.users.get(&user_id)
+                        .map(|u| u.username.clone())
+                        .or_else(|| {
+                            // Try to find in members
+                            s.members.values()
+                                .flatten()
+                                .find(|m| m.id == user_id)
+                                .map(|m| m.username.clone())
+                        })
+                        .unwrap_or_else(|| format!("User {}", &user_id.to_string()[..8]));
+
+                    s.voice_participants.insert(user_id, crate::state::VoiceParticipant {
+                        user_id,
+                        username,
+                        is_muted: false,
+                        is_deafened: false,
+                        is_video_enabled: false,
+                        is_screen_sharing: false,
+                        is_speaking: false,
+                        speaking_since: None,
+                    });
+                }
+            }
+            ServerMessage::VoiceUserLeft { channel_id, user_id } => {
+                tracing::info!("User {} left voice channel {}", user_id, channel_id);
+                let mut s = state.write().await;
+                if s.voice_channel_id == Some(channel_id) {
+                    s.voice_participants.remove(&user_id);
                 }
             }
             ServerMessage::UserTyping { channel_id, user_id } => {

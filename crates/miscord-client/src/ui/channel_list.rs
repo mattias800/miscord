@@ -4,6 +4,8 @@ use crate::network::NetworkClient;
 use crate::state::AppState;
 use miscord_protocol::ChannelType;
 
+use super::theme;
+
 pub struct ChannelList {
     show_create_dialog: bool,
     new_channel_name: String,
@@ -146,8 +148,38 @@ impl ChannelList {
             if !voice_channels.is_empty() {
                 ui.collapsing("Voice Channels", |ui| {
                     for channel in voice_channels {
-                        let voice_channel_id = runtime.block_on(async {
-                            state.read().await.voice_channel_id
+                        // Fetch participants from server for all voice channels
+                        let (voice_channel_id, participants, local_speaking) = runtime.block_on(async {
+                            let s = state.read().await;
+                            let voice_channel_id = s.voice_channel_id;
+                            let local_speaking = s.is_speaking;
+                            drop(s); // Release lock before network call
+
+                            // If we're in this channel, use local state; otherwise fetch from server
+                            let participants = if voice_channel_id == Some(channel.id) {
+                                state.get_voice_channel_participants(channel.id).await
+                            } else {
+                                // Fetch from server for channels we're not in
+                                match network.get_voice_participants(channel.id).await {
+                                    Ok(server_participants) => {
+                                        server_participants.into_iter().map(|p| {
+                                            crate::state::VoiceParticipant {
+                                                user_id: p.user_id,
+                                                username: p.username,
+                                                is_muted: p.self_muted,
+                                                is_deafened: p.self_deafened,
+                                                is_video_enabled: p.video_enabled,
+                                                is_screen_sharing: p.screen_sharing,
+                                                is_speaking: false,
+                                                speaking_since: None,
+                                            }
+                                        }).collect()
+                                    }
+                                    Err(_) => Vec::new()
+                                }
+                            };
+
+                            (voice_channel_id, participants, local_speaking)
                         });
 
                         let is_connected = voice_channel_id == Some(channel.id);
@@ -170,8 +202,117 @@ impl ChannelList {
                             } else {
                                 // Join voice
                                 runtime.spawn(async move {
+                                    // Subscribe FIRST so we receive broadcasts about other users joining
+                                    network.subscribe_channel(channel_id).await;
+
+                                    // Set local voice channel BEFORE API call so we're ready
+                                    // to receive VoiceUserJoined broadcasts (including our own)
+                                    state.join_voice(channel_id).await;
+
                                     if network.join_voice(channel_id).await.is_ok() {
-                                        state.join_voice(channel_id).await;
+                                        // Fetch existing participants and add them
+                                        if let Ok(existing) = network.get_voice_participants(channel_id).await {
+                                            let mut s = state.write().await;
+                                            for p in existing {
+                                                // Don't overwrite ourselves
+                                                if s.current_user.as_ref().map(|u| u.id) != Some(p.user_id) {
+                                                    s.voice_participants.insert(p.user_id, crate::state::VoiceParticipant {
+                                                        user_id: p.user_id,
+                                                        username: p.username,
+                                                        is_muted: p.self_muted,
+                                                        is_deafened: p.self_deafened,
+                                                        is_video_enabled: p.video_enabled,
+                                                        is_screen_sharing: p.screen_sharing,
+                                                        is_speaking: false,
+                                                        speaking_since: None,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // API call failed, revert local state
+                                        state.leave_voice().await;
+                                    }
+                                });
+                            }
+                        }
+
+                        // Show participants under the voice channel
+                        if !participants.is_empty() {
+                            let current_user_id = runtime.block_on(async {
+                                state.read().await.current_user.as_ref().map(|u| u.id)
+                            });
+
+                            for participant in &participants {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0); // Indent
+
+                                    // Small avatar circle with initial
+                                    let initial = participant.username
+                                        .chars()
+                                        .next()
+                                        .unwrap_or('?')
+                                        .to_uppercase()
+                                        .to_string();
+
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(16.0, 16.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    let painter = ui.painter_at(rect);
+                                    painter.circle_filled(rect.center(), 8.0, theme::BG_ACCENT);
+                                    painter.text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &initial,
+                                        egui::FontId::proportional(9.0),
+                                        theme::TEXT_NORMAL,
+                                    );
+
+                                    ui.add_space(4.0);
+
+                                    // Check if this participant is speaking
+                                    let is_self = current_user_id == Some(participant.user_id);
+                                    let is_speaking = if is_self {
+                                        local_speaking
+                                    } else {
+                                        participant.is_speaking
+                                    };
+
+                                    // Username - bright white when speaking, muted when silent
+                                    let name_color = if is_speaking {
+                                        theme::TEXT_NORMAL
+                                    } else {
+                                        theme::TEXT_MUTED
+                                    };
+
+                                    ui.label(
+                                        egui::RichText::new(&participant.username)
+                                            .color(name_color)
+                                            .size(12.0),
+                                    );
+
+                                    // Status icons
+                                    if participant.is_muted {
+                                        ui.label(
+                                            egui::RichText::new("🔇")
+                                                .size(10.0)
+                                                .color(theme::TEXT_MUTED),
+                                        );
+                                    }
+                                    if participant.is_video_enabled {
+                                        ui.label(
+                                            egui::RichText::new("📹")
+                                                .size(10.0)
+                                                .color(theme::TEXT_MUTED),
+                                        );
+                                    }
+                                    if participant.is_screen_sharing {
+                                        ui.label(
+                                            egui::RichText::new("🖥")
+                                                .size(10.0)
+                                                .color(theme::TEXT_MUTED),
+                                        );
                                     }
                                 });
                             }

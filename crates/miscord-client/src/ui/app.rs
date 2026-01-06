@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::network::NetworkClient;
-use crate::state::AppState;
+use crate::state::{AppState, PersistentSettings};
 
 use super::login::LoginView;
 use super::main_view::MainView;
@@ -67,6 +67,33 @@ impl MiscordApp {
 
         let state = AppState::new();
         let network = NetworkClient::new(state.clone());
+
+        // Load persistent settings and apply to state
+        let persistent_settings = PersistentSettings::load();
+        runtime.block_on(async {
+            let mut s = state.write().await;
+            if let Some(device) = &persistent_settings.input_device {
+                s.selected_input_device = Some(device.clone());
+            }
+            if let Some(device) = &persistent_settings.output_device {
+                s.selected_output_device = Some(device.clone());
+            }
+            if let Some(device) = persistent_settings.video_device {
+                s.selected_video_device = Some(device);
+            }
+            if let Some(gain) = persistent_settings.input_gain_db {
+                s.input_gain_db = gain;
+            }
+            if let Some(threshold) = persistent_settings.gate_threshold_db {
+                s.gate_threshold_db = threshold;
+            }
+            if let Some(enabled) = persistent_settings.gate_enabled {
+                s.gate_enabled = enabled;
+            }
+            if let Some(enabled) = persistent_settings.loopback_enabled {
+                s.loopback_enabled = enabled;
+            }
+        });
 
         Self {
             state,

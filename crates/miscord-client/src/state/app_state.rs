@@ -40,10 +40,12 @@ pub struct AppStateInner {
     // Voice state
     pub voice_channel_id: Option<Uuid>,
     pub voice_participants: HashMap<Uuid, VoiceParticipant>,
+    pub voice_channel_participants: HashMap<Uuid, Vec<VoiceParticipant>>, // All voice channel participants for sidebar
     pub is_muted: bool,
     pub is_deafened: bool,
     pub is_video_enabled: bool,
     pub is_screen_sharing: bool,
+    pub is_speaking: bool, // Local user speaking status
 
     // WebRTC signaling
     pub pending_rtc_offers: Vec<RtcSignal>,
@@ -85,10 +87,12 @@ impl Default for AppStateInner {
             typing_users: HashMap::new(),
             voice_channel_id: None,
             voice_participants: HashMap::new(),
+            voice_channel_participants: HashMap::new(),
             is_muted: false,
             is_deafened: false,
             is_video_enabled: false,
             is_screen_sharing: false,
+            is_speaking: false,
             pending_rtc_offers: Vec::new(),
             pending_rtc_answers: Vec::new(),
             pending_ice_candidates: Vec::new(),
@@ -128,6 +132,7 @@ pub struct VoiceParticipant {
     pub is_video_enabled: bool,
     pub is_screen_sharing: bool,
     pub is_speaking: bool,
+    pub speaking_since: Option<Instant>,
 }
 
 impl AppState {
@@ -205,6 +210,21 @@ impl AppState {
         let mut state = self.inner.write().await;
         state.voice_channel_id = Some(channel_id);
         state.voice_participants.clear();
+
+        // Add self to voice participants
+        if let Some(user) = state.current_user.clone() {
+            let participant = VoiceParticipant {
+                user_id: user.id,
+                username: user.username.clone(),
+                is_muted: state.is_muted,
+                is_deafened: state.is_deafened,
+                is_video_enabled: state.is_video_enabled,
+                is_screen_sharing: state.is_screen_sharing,
+                is_speaking: false,
+                speaking_since: None,
+            };
+            state.voice_participants.insert(user.id, participant);
+        }
     }
 
     pub async fn leave_voice(&self) {
@@ -215,6 +235,56 @@ impl AppState {
         state.is_deafened = false;
         state.is_video_enabled = false;
         state.is_screen_sharing = false;
+        state.is_speaking = false;
+    }
+
+    /// Set local user speaking status
+    pub async fn set_local_speaking(&self, speaking: bool) {
+        let mut state = self.inner.write().await;
+        state.is_speaking = speaking;
+    }
+
+    /// Update a participant's speaking status
+    pub async fn update_participant_speaking(&self, user_id: Uuid, speaking: bool) {
+        let mut state = self.inner.write().await;
+        if let Some(participant) = state.voice_participants.get_mut(&user_id) {
+            participant.is_speaking = speaking;
+            participant.speaking_since = if speaking { Some(Instant::now()) } else { None };
+        }
+    }
+
+    /// Get participants for a specific voice channel (for sidebar display)
+    pub async fn get_voice_channel_participants(&self, channel_id: Uuid) -> Vec<VoiceParticipant> {
+        let state = self.inner.read().await;
+        // If we're in this channel, return our participants
+        if state.voice_channel_id == Some(channel_id) {
+            state.voice_participants.values().cloned().collect()
+        } else {
+            // Otherwise return cached participants for other channels
+            state
+                .voice_channel_participants
+                .get(&channel_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    /// Update voice channel participants (from server broadcast)
+    pub async fn set_voice_channel_participants(&self, channel_id: Uuid, participants: Vec<VoiceParticipant>) {
+        let mut state = self.inner.write().await;
+        state.voice_channel_participants.insert(channel_id, participants);
+    }
+
+    /// Add a participant to voice channel
+    pub async fn add_voice_participant(&self, participant: VoiceParticipant) {
+        let mut state = self.inner.write().await;
+        state.voice_participants.insert(participant.user_id, participant);
+    }
+
+    /// Remove a participant from voice channel
+    pub async fn remove_voice_participant(&self, user_id: Uuid) {
+        let mut state = self.inner.write().await;
+        state.voice_participants.remove(&user_id);
     }
 
     // Typing indicator methods

@@ -18,6 +18,18 @@ use anyhow::Result;
 pub async fn create_app(config: state::Config) -> Result<(axum::Router, sqlx::PgPool)> {
     let db_pool = db::init_pool(&config.database_url).await?;
     db::run_migrations(&db_pool).await?;
+
+    // Clean up any stale voice states from previous server sessions
+    let deleted = sqlx::query!("DELETE FROM voice_states")
+        .execute(&db_pool)
+        .await?;
+    if deleted.rows_affected() > 0 {
+        tracing::info!(
+            "Cleaned up {} stale voice states from previous session",
+            deleted.rows_affected()
+        );
+    }
+
     let app_state = state::AppState::new(config, db_pool.clone());
     let router = api::create_router(app_state);
     Ok((router, db_pool))

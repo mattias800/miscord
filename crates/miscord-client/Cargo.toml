@@ -61,6 +61,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # Futures
 futures = "0.3"
 
+# Settings persistence
+dirs = "5"
+
 # Screen capture (cross-platform) - TODO: Fix type annotation issues
 # xcap = "0.0.14"
 

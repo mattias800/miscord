@@ -6,6 +6,7 @@ mod community_list;
 mod channel_list;
 mod member_list;
 mod voice;
+mod voice_channel_view;
 mod markdown;
 mod settings;
 pub mod theme;

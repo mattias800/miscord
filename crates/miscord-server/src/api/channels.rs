@@ -49,20 +49,12 @@ pub async fn join_voice(
         .join_voice(channel_id, auth.user_id)
         .await?;
 
-    // Notify other participants via WebSocket
+    // Notify other participants that a user joined
     state.connections.broadcast_to_channel(
         channel_id,
-        &miscord_protocol::ServerMessage::VoiceStateUpdate {
+        &miscord_protocol::ServerMessage::VoiceUserJoined {
             channel_id,
             user_id: auth.user_id,
-            state: miscord_protocol::VoiceStateData {
-                muted: voice_state.muted,
-                deafened: voice_state.deafened,
-                self_muted: voice_state.self_muted,
-                self_deafened: voice_state.self_deafened,
-                video_enabled: voice_state.video_enabled,
-                screen_sharing: voice_state.screen_sharing,
-            },
         },
     ).await;
 
@@ -73,7 +65,19 @@ pub async fn leave_voice(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<()> {
-    state.channel_service.leave_voice(auth.user_id).await?;
+    let channel_id = state.channel_service.leave_voice(auth.user_id).await?;
+
+    // Notify other participants that a user left
+    if let Some(channel_id) = channel_id {
+        state.connections.broadcast_to_channel(
+            channel_id,
+            &miscord_protocol::ServerMessage::VoiceUserLeft {
+                channel_id,
+                user_id: auth.user_id,
+            },
+        ).await;
+    }
+
     Ok(())
 }
 
@@ -119,6 +123,44 @@ pub async fn update_voice_state(
     ).await;
 
     Ok(Json(voice_state))
+}
+
+/// Response for voice participant with username
+#[derive(Debug, serde::Serialize)]
+pub struct VoiceParticipantResponse {
+    pub user_id: Uuid,
+    pub username: String,
+    pub self_muted: bool,
+    pub self_deafened: bool,
+    pub video_enabled: bool,
+    pub screen_sharing: bool,
+}
+
+pub async fn get_voice_participants(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Path(channel_id): Path<Uuid>,
+) -> Result<Json<Vec<VoiceParticipantResponse>>> {
+    let voice_states = state.channel_service.get_voice_participants(channel_id).await?;
+
+    // Get usernames for all participants
+    let mut participants = Vec::new();
+    for vs in voice_states {
+        let username = state.user_service.get_by_id(vs.user_id).await
+            .map(|u| u.username)
+            .unwrap_or_else(|_| format!("User {}", &vs.user_id.to_string()[..8]));
+
+        participants.push(VoiceParticipantResponse {
+            user_id: vs.user_id,
+            username,
+            self_muted: vs.self_muted,
+            self_deafened: vs.self_deafened,
+            video_enabled: vs.video_enabled,
+            screen_sharing: vs.screen_sharing,
+        });
+    }
+
+    Ok(Json(participants))
 }
 
 // Direct message endpoints
