@@ -8,6 +8,7 @@ pub mod db;
 pub mod error;
 pub mod models;
 pub mod services;
+pub mod sfu;
 pub mod state;
 pub mod webrtc;
 pub mod ws;

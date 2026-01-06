@@ -1,9 +1,118 @@
 //! Persistent settings storage
 //!
 //! Saves user preferences to a local JSON file.
+//! Also handles session persistence for automatic login.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Get the current profile name from environment or use "default"
+fn get_profile_name() -> String {
+    std::env::var("MISCORD_PROFILE").unwrap_or_else(|_| "default".to_string())
+}
+
+/// Get the base config directory for miscord
+fn get_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("miscord"))
+}
+
+/// Persistent user session for automatic login
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Session {
+    /// The auth token from login
+    pub auth_token: String,
+    /// The server URL used for login
+    pub server_url: String,
+    /// User ID
+    pub user_id: String,
+    /// Username for display
+    pub username: String,
+}
+
+impl Session {
+    /// Get the session file path for the current profile
+    fn session_path() -> Option<PathBuf> {
+        let profile = get_profile_name();
+        get_config_dir().map(|p| p.join("sessions").join(format!("{}.json", profile)))
+    }
+
+    /// Load session from disk
+    pub fn load() -> Option<Self> {
+        let path = Self::session_path()?;
+
+        if !path.exists() {
+            tracing::debug!("No saved session for profile '{}'", get_profile_name());
+            return None;
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(session) => {
+                    tracing::info!(
+                        "Loaded session for profile '{}' from {:?}",
+                        get_profile_name(),
+                        path
+                    );
+                    Some(session)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse session file: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::debug!("Failed to read session file: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Save session to disk
+    pub fn save(&self) {
+        let Some(path) = Self::session_path() else {
+            tracing::warn!("Could not determine config directory");
+            return;
+        };
+
+        // Create directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::error!("Failed to create sessions directory: {}", e);
+                return;
+            }
+        }
+
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::error!("Failed to write session file: {}", e);
+                } else {
+                    tracing::info!(
+                        "Saved session for profile '{}' to {:?}",
+                        get_profile_name(),
+                        path
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize session: {}", e);
+            }
+        }
+    }
+
+    /// Delete the saved session (for logout)
+    pub fn delete() {
+        if let Some(path) = Self::session_path() {
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::error!("Failed to delete session file: {}", e);
+                } else {
+                    tracing::info!("Deleted session for profile '{}'", get_profile_name());
+                }
+            }
+        }
+    }
+}
 
 /// Persistent user settings
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

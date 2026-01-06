@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::network::NetworkClient;
-use crate::state::{LoginRequest, RegisterRequest};
+use crate::state::{LoginRequest, RegisterRequest, Session};
 use miscord_protocol::UserData;
 
 pub struct LoginView {
@@ -14,6 +14,7 @@ pub struct LoginView {
     error: Option<String>,
     is_loading: bool,
     auto_login_attempted: bool,
+    session_restore_attempted: bool,
 }
 
 enum LoginMode {
@@ -46,19 +47,65 @@ impl LoginView {
     pub fn new() -> Self {
         let config = AutoLoginConfig::from_env();
 
+        // Try to get server URL from saved session, then env, then default
+        let saved_session = Session::load();
+        let server_url = saved_session
+            .as_ref()
+            .map(|s| s.server_url.clone())
+            .or(config.server_url.clone())
+            .unwrap_or_else(|| "http://localhost:8080".to_string());
+
+        // Pre-fill username from saved session or env
+        let username = saved_session
+            .as_ref()
+            .map(|s| s.username.clone())
+            .or(config.username.clone())
+            .unwrap_or_default();
+
         Self {
             mode: LoginMode::Login,
-            username: config.username.clone().unwrap_or_default(),
+            username,
             password: config.password.clone().unwrap_or_default(),
             email: String::new(),
             display_name: String::new(),
-            server_url: config
-                .server_url
-                .unwrap_or_else(|| "http://localhost:8080".to_string()),
+            server_url,
             error: None,
             is_loading: false,
             auto_login_attempted: false,
+            session_restore_attempted: false,
         }
+    }
+
+    /// Check if session restore should be attempted
+    pub fn should_restore_session(&self) -> bool {
+        !self.session_restore_attempted && Session::load().is_some()
+    }
+
+    /// Try to restore a saved session
+    pub fn try_restore_session(
+        &mut self,
+        network: &NetworkClient,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Option<(String, UserData)> {
+        self.session_restore_attempted = true;
+
+        if let Some(session) = Session::load() {
+            tracing::info!("Attempting to restore session for user '{}'", session.username);
+
+            match runtime.block_on(network.validate_token(&session.server_url, &session.auth_token)) {
+                Ok(user) => {
+                    tracing::info!("Session restored successfully for user '{}'", session.username);
+                    return Some((session.auth_token, user));
+                }
+                Err(e) => {
+                    tracing::warn!("Session restore failed (token may be expired): {}", e);
+                    // Delete the invalid session
+                    Session::delete();
+                }
+            }
+        }
+
+        None
     }
 
     /// Check if auto-login should be attempted
@@ -79,12 +126,17 @@ impl LoginView {
         if let (Some(username), Some(password)) = (config.username, config.password) {
             tracing::info!("Attempting auto-login as {}", username);
 
-            let request = LoginRequest { username, password };
+            let request = LoginRequest {
+                username: username.clone(),
+                password,
+            };
             let server_url = self.server_url.clone();
 
             match runtime.block_on(network.login(&server_url, request)) {
                 Ok((token, user)) => {
                     tracing::info!("Auto-login successful");
+                    // Save the session
+                    Self::save_session(&token, &server_url, &user);
                     return Some((token, user));
                 }
                 Err(e) => {
@@ -95,6 +147,17 @@ impl LoginView {
         }
 
         None
+    }
+
+    /// Save session to disk
+    fn save_session(token: &str, server_url: &str, user: &UserData) {
+        let session = Session {
+            auth_token: token.to_string(),
+            server_url: server_url.to_string(),
+            user_id: user.id.to_string(),
+            username: user.username.clone(),
+        };
+        session.save();
     }
 
     pub fn show(
@@ -151,6 +214,8 @@ impl LoginView {
 
                                 match runtime.block_on(network.login(&server_url, request)) {
                                     Ok((token, user)) => {
+                                        // Save the session for next time
+                                        Self::save_session(&token, &server_url, &user);
                                         result = Some((token, user));
                                     }
                                     Err(e) => {

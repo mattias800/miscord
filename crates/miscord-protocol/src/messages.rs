@@ -33,6 +33,19 @@ pub enum ClientMessage {
 
     /// WebRTC ICE candidate
     RtcIceCandidate { target_user_id: Uuid, candidate: String },
+
+    /// SFU: Send WebRTC offer to server for video streaming
+    SfuOffer { channel_id: Uuid, sdp: String },
+
+    /// SFU: Send WebRTC answer to server (for renegotiation)
+    SfuAnswer { sdp: String },
+
+    /// SFU: Send ICE candidate to server
+    SfuIceCandidate {
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    },
 }
 
 /// Messages sent from server to client via WebSocket
@@ -104,4 +117,27 @@ pub enum ServerMessage {
 
     /// WebRTC ICE candidate from another user
     RtcIceCandidate { from_user_id: Uuid, candidate: String },
+
+    /// SFU: WebRTC answer from server
+    SfuAnswer { sdp: String },
+
+    /// SFU: ICE candidate from server
+    SfuIceCandidate {
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    },
+
+    /// SFU: A new video track was added (another user started streaming)
+    SfuTrackAdded {
+        user_id: Uuid,
+        track_id: String,
+        kind: String,
+    },
+
+    /// SFU: A video track was removed (user stopped streaming)
+    SfuTrackRemoved { user_id: Uuid, track_id: String },
+
+    /// SFU: Server needs to renegotiate (new track available)
+    SfuRenegotiate { sdp: String },
 }

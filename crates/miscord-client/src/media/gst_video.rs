@@ -13,6 +13,7 @@ pub struct VideoDeviceInfo {
     pub device_path: String,
 }
 
+#[derive(Clone)]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,

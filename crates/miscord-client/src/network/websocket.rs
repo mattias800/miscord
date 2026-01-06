@@ -214,6 +214,40 @@ impl WebSocketClient {
                 tracing::debug!("Received ICE candidate from {}", from_user_id);
                 state.add_ice_candidate(from_user_id, candidate).await;
             }
+            // SFU messages
+            ServerMessage::SfuAnswer { sdp } => {
+                tracing::info!("Received SFU answer");
+                state.set_sfu_answer(sdp).await;
+            }
+            ServerMessage::SfuIceCandidate {
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
+            } => {
+                tracing::debug!("Received SFU ICE candidate");
+                state.add_sfu_ice_candidate(candidate, sdp_mid, sdp_mline_index).await;
+            }
+            ServerMessage::SfuTrackAdded {
+                user_id,
+                track_id,
+                kind,
+            } => {
+                tracing::info!(
+                    "SFU track added: user={}, track={}, kind={}",
+                    user_id,
+                    track_id,
+                    kind
+                );
+                state.sfu_track_added(user_id, track_id, kind).await;
+            }
+            ServerMessage::SfuTrackRemoved { user_id, track_id } => {
+                tracing::info!("SFU track removed: user={}, track={}", user_id, track_id);
+                state.sfu_track_removed(user_id, track_id).await;
+            }
+            ServerMessage::SfuRenegotiate { sdp } => {
+                tracing::info!("SFU renegotiation requested");
+                state.set_sfu_renegotiate(sdp).await;
+            }
             ServerMessage::Pong => {
                 // Heartbeat response
             }
@@ -278,6 +312,37 @@ impl WebSocketClient {
             .send(ClientMessage::RtcIceCandidate {
                 target_user_id,
                 candidate,
+            })
+            .await;
+    }
+
+    // SFU signaling methods
+    pub async fn send_sfu_offer(&self, channel_id: Uuid, sdp: String) {
+        let _ = self
+            .sender
+            .send(ClientMessage::SfuOffer { channel_id, sdp })
+            .await;
+    }
+
+    pub async fn send_sfu_answer(&self, sdp: String) {
+        let _ = self
+            .sender
+            .send(ClientMessage::SfuAnswer { sdp })
+            .await;
+    }
+
+    pub async fn send_sfu_ice_candidate(
+        &self,
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    ) {
+        let _ = self
+            .sender
+            .send(ClientMessage::SfuIceCandidate {
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
             })
             .await;
     }

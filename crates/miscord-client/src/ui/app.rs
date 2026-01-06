@@ -135,8 +135,13 @@ impl eframe::App for MiscordApp {
 
         match &self.view {
             View::Login => {
-                // Try auto-login first if credentials are available
-                let login_result = if self.login_view.should_auto_login() {
+                // Try session restore first (saved token from previous login)
+                // Then try auto-login from environment variables
+                // Finally show the login UI
+                let login_result = if self.login_view.should_restore_session() {
+                    self.login_view
+                        .try_restore_session(&self.network, &self.runtime)
+                } else if self.login_view.should_auto_login() {
                     self.login_view
                         .try_auto_login(&self.network, &self.runtime)
                 } else {

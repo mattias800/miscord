@@ -2,10 +2,7 @@ use anyhow::Result;
 use eframe::egui;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod media;
-mod network;
-mod state;
-mod ui;
+use miscord_client::ui;
 
 fn main() -> Result<()> {
     // Initialize tracing

@@ -1,15 +1,19 @@
 //! Voice Channel View component
 //!
 //! Displays a Discord-like grid of participants when in a voice channel.
+//! Integrates with SFU (Selective Forwarding Unit) for video streaming.
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::media::gst_video::GstVideoCapture;
+use crate::media::sfu_client::SfuClient;
 use crate::media::VoiceActivityDetector;
+use crate::network::NetworkClient;
 use crate::state::{AppState, VoiceParticipant};
 
 use super::theme;
@@ -22,8 +26,14 @@ pub struct VoiceChannelView {
     video_texture: Option<TextureHandle>,
     /// Voice Activity Detector
     vad: Option<VoiceActivityDetector>,
-    /// Cached participant textures (for future remote video)
-    _participant_textures: HashMap<Uuid, TextureHandle>,
+    /// Remote video textures (user_id -> texture)
+    remote_textures: HashMap<Uuid, TextureHandle>,
+    /// SFU client for video streaming
+    sfu_client: Option<SfuClient>,
+    /// Channel for SFU ICE candidates
+    ice_candidate_rx: Option<mpsc::UnboundedReceiver<crate::media::IceCandidate>>,
+    /// Current voice channel ID for SFU
+    sfu_channel_id: Option<Uuid>,
 }
 
 impl VoiceChannelView {
@@ -32,7 +42,10 @@ impl VoiceChannelView {
             video_capture: None,
             video_texture: None,
             vad: None,
-            _participant_textures: HashMap::new(),
+            remote_textures: HashMap::new(),
+            sfu_client: None,
+            ice_candidate_rx: None,
+            sfu_channel_id: None,
         }
     }
 
@@ -82,6 +95,7 @@ impl VoiceChannelView {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         state: &AppState,
+        network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
         // Update VAD state
@@ -114,22 +128,33 @@ impl VoiceChannelView {
                         TextureOptions::default(),
                     ));
                 }
+
+                // Send frame to SFU if connected
+                if let Some(sfu) = &self.sfu_client {
+                    let sfu_clone = sfu.clone();
+                    let frame_clone = frame.clone();
+                    runtime.spawn(async move {
+                        if let Err(e) = sfu_clone.send_frame(&frame_clone).await {
+                            tracing::debug!("Failed to send frame to SFU: {}", e);
+                        }
+                    });
+                }
             }
         }
 
         // Get voice state
-        let (channel_name, participants, current_user_id, is_video_enabled) =
+        let (channel_name, voice_channel_id, participants, current_user_id, is_video_enabled) =
             runtime.block_on(async {
                 let s = state.read().await;
-                let channel_name = s
-                    .voice_channel_id
+                let voice_channel_id = s.voice_channel_id;
+                let channel_name = voice_channel_id
                     .and_then(|id| s.channels.get(&id))
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| "Voice Channel".to_string());
                 let participants: Vec<_> = s.voice_participants.values().cloned().collect();
                 let current_user_id = s.current_user.as_ref().map(|u| u.id);
                 let is_video = s.is_video_enabled;
-                (channel_name, participants, current_user_id, is_video)
+                (channel_name, voice_channel_id, participants, current_user_id, is_video)
             });
 
         // Manage video capture based on state
@@ -139,6 +164,22 @@ impl VoiceChannelView {
         } else if !is_video_enabled && self.video_capture.is_some() {
             self.stop_video();
         }
+
+        // Check if any participant has video enabled (need SFU to receive their video)
+        let any_video_in_channel = participants.iter().any(|p| p.is_video_enabled);
+        let should_connect_sfu = is_video_enabled || any_video_in_channel;
+
+        // Manage SFU connection for video streaming
+        self.update_sfu_connection(state, network, runtime, voice_channel_id, should_connect_sfu);
+
+        // Process pending ICE candidates from SFU client
+        self.process_ice_candidates(network, runtime);
+
+        // Handle SFU signaling messages from server
+        self.handle_sfu_signaling(state, network, runtime);
+
+        // Update remote video textures
+        self.update_remote_textures(ctx, runtime);
 
         // Request repaint for continuous updates (~30 FPS)
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -316,17 +357,34 @@ impl VoiceChannelView {
                 self.render_avatar(&painter, content_rect, &participant.username);
             }
         } else if has_video && !is_self {
-            // Remote video - not implemented yet, show avatar with camera indicator
-            self.render_avatar(&painter, content_rect, &participant.username);
-            // Show camera icon overlay to indicate video is enabled
-            let icon_pos = egui::pos2(content_rect.right() - 20.0, content_rect.top() + 20.0);
-            painter.text(
-                icon_pos,
-                egui::Align2::CENTER_CENTER,
-                "📹",
-                egui::FontId::proportional(16.0),
-                theme::TEXT_NORMAL,
-            );
+            // Remote video - check if we have a texture for this user
+            if let Some(texture) = self.remote_textures.get(&participant.user_id) {
+                // Maintain aspect ratio
+                let tex_size = texture.size_vec2();
+                let scale = (content_rect.width() / tex_size.x)
+                    .min(content_rect.height() / tex_size.y);
+                let video_size = tex_size * scale;
+                let video_rect = egui::Rect::from_center_size(content_rect.center(), video_size);
+
+                painter.image(
+                    texture.id(),
+                    video_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            } else {
+                // No remote video yet, show avatar with camera indicator
+                self.render_avatar(&painter, content_rect, &participant.username);
+                // Show camera icon overlay to indicate video is enabled
+                let icon_pos = egui::pos2(content_rect.right() - 20.0, content_rect.top() + 20.0);
+                painter.text(
+                    icon_pos,
+                    egui::Align2::CENTER_CENTER,
+                    "📹",
+                    egui::FontId::proportional(16.0),
+                    theme::TEXT_NORMAL,
+                );
+            }
         } else {
             // No video - show avatar
             self.render_avatar(&painter, content_rect, &participant.username);
@@ -400,10 +458,213 @@ impl VoiceChannelView {
         );
     }
 
+    /// Update SFU connection based on voice and video state
+    fn update_sfu_connection(
+        &mut self,
+        state: &AppState,
+        network: &NetworkClient,
+        runtime: &tokio::runtime::Runtime,
+        voice_channel_id: Option<Uuid>,
+        should_connect_sfu: bool,
+    ) {
+        // should_connect_sfu is already computed by caller (includes any_video_in_channel check)
+        let should_connect = voice_channel_id.is_some() && should_connect_sfu;
+        let channel_changed = self.sfu_channel_id != voice_channel_id;
+        let has_sfu = self.sfu_client.is_some();
+
+        tracing::info!(
+            "SFU state check: voice_channel={:?}, should_connect_sfu={}, should_connect={}, channel_changed={}, has_sfu={}",
+            voice_channel_id, should_connect_sfu, should_connect, channel_changed, has_sfu
+        );
+
+        if should_connect && (self.sfu_client.is_none() || channel_changed) {
+            // Connect to SFU
+            if let Some(channel_id) = voice_channel_id {
+                tracing::info!("Connecting to SFU for channel {}", channel_id);
+
+                // Create ICE candidate channel
+                let (ice_tx, ice_rx) = mpsc::unbounded_channel();
+                self.ice_candidate_rx = Some(ice_rx);
+
+                // Get ICE servers and connect
+                let network_clone = network.clone();
+                let state_clone = state.clone();
+                let mut sfu = SfuClient::new();
+
+                let result = runtime.block_on(async {
+                    // Get ICE servers from server
+                    let ice_servers = match network_clone.get_ice_servers().await {
+                        Ok(servers) => servers
+                            .into_iter()
+                            .map(|s| (s.urls[0].clone(), s.username, s.credential))
+                            .collect(),
+                        Err(e) => {
+                            tracing::warn!("Failed to get ICE servers: {}, using defaults", e);
+                            vec![("stun:stun.l.google.com:19302".to_string(), None, None)]
+                        }
+                    };
+
+                    // Connect to SFU
+                    match sfu.connect(channel_id, ice_servers, ice_tx).await {
+                        Ok(offer_sdp) => {
+                            // Send offer to server via WebSocket
+                            network_clone.send_sfu_offer(channel_id, offer_sdp).await;
+                            Ok(sfu)
+                        }
+                        Err(e) => Err(e),
+                    }
+                });
+
+                match result {
+                    Ok(sfu) => {
+                        self.sfu_client = Some(sfu);
+                        self.sfu_channel_id = Some(channel_id);
+                        tracing::info!("SFU client connected, offer sent");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to connect to SFU: {}", e);
+                    }
+                }
+            }
+        } else if !should_connect && self.sfu_client.is_some() {
+            // Disconnect from SFU
+            tracing::info!("Disconnecting from SFU");
+            if let Some(mut sfu) = self.sfu_client.take() {
+                runtime.block_on(async {
+                    if let Err(e) = sfu.disconnect().await {
+                        tracing::warn!("Error disconnecting from SFU: {}", e);
+                    }
+                });
+            }
+            self.sfu_channel_id = None;
+            self.ice_candidate_rx = None;
+            self.remote_textures.clear();
+        }
+    }
+
+    /// Process pending ICE candidates from the SFU client
+    fn process_ice_candidates(&mut self, network: &NetworkClient, runtime: &tokio::runtime::Runtime) {
+        if let Some(rx) = &mut self.ice_candidate_rx {
+            // Drain all pending ICE candidates
+            while let Ok(candidate) = rx.try_recv() {
+                let network = network.clone();
+                runtime.spawn(async move {
+                    network
+                        .send_sfu_ice_candidate(
+                            candidate.candidate,
+                            candidate.sdp_mid,
+                            candidate.sdp_mline_index,
+                        )
+                        .await;
+                });
+            }
+        }
+    }
+
+    /// Handle SFU signaling messages from the server
+    fn handle_sfu_signaling(
+        &mut self,
+        state: &AppState,
+        network: &NetworkClient,
+        runtime: &tokio::runtime::Runtime,
+    ) {
+        if let Some(sfu) = &self.sfu_client {
+            // Handle SFU answer
+            let answer = runtime.block_on(state.take_sfu_answer());
+            if let Some(sdp) = answer {
+                let sfu_clone = sfu.clone();
+                runtime.block_on(async {
+                    if let Err(e) = sfu_clone.handle_answer(sdp).await {
+                        tracing::error!("Failed to handle SFU answer: {}", e);
+                    }
+                });
+            }
+
+            // Handle SFU renegotiation
+            let renegotiate = runtime.block_on(state.take_sfu_renegotiate());
+            if let Some(sdp) = renegotiate {
+                let sfu_clone = sfu.clone();
+                let network_clone = network.clone();
+                let state_clone = state.clone();
+                let sdp_clone = sdp.clone();
+                runtime.block_on(async {
+                    match sfu_clone.handle_renegotiate(sdp).await {
+                        Ok(Some(answer_sdp)) => {
+                            network_clone.send_sfu_answer(answer_sdp).await;
+                        }
+                        Ok(None) => {
+                            // Not ready yet (waiting for stable state), re-queue for next frame
+                            state_clone.set_sfu_renegotiate(sdp_clone).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to handle SFU renegotiation: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // Handle ICE candidates from server
+            let candidates = runtime.block_on(state.take_sfu_ice_candidates());
+            for candidate in candidates {
+                let sfu_clone = sfu.clone();
+                runtime.block_on(async {
+                    if let Err(e) = sfu_clone
+                        .add_ice_candidate(
+                            candidate.candidate,
+                            candidate.sdp_mid,
+                            candidate.sdp_mline_index,
+                        )
+                        .await
+                    {
+                        tracing::warn!("Failed to add ICE candidate: {}", e);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Update remote video textures from SFU
+    fn update_remote_textures(&mut self, ctx: &egui::Context, runtime: &tokio::runtime::Runtime) {
+        if let Some(sfu) = &self.sfu_client {
+            let remote_users = runtime.block_on(sfu.get_remote_users());
+
+            for user_id in remote_users {
+                if let Some(frame) = runtime.block_on(sfu.get_remote_frame(user_id)) {
+                    if frame.data.len() >= (frame.width * frame.height * 3) as usize {
+                        let image = ColorImage::from_rgb(
+                            [frame.width as usize, frame.height as usize],
+                            &frame.data,
+                        );
+
+                        if let Some(texture) = self.remote_textures.get_mut(&user_id) {
+                            texture.set(image, TextureOptions::default());
+                        } else {
+                            let texture = ctx.load_texture(
+                                format!("remote_video_{}", user_id),
+                                image,
+                                TextureOptions::default(),
+                            );
+                            self.remote_textures.insert(user_id, texture);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Clean up resources
     pub fn cleanup(&mut self) {
         self.stop_video();
         self.vad = None;
+
+        // Disconnect SFU
+        if let Some(mut sfu) = self.sfu_client.take() {
+            // Can't call async disconnect in sync cleanup, just drop it
+            drop(sfu);
+        }
+        self.sfu_channel_id = None;
+        self.ice_candidate_rx = None;
+        self.remote_textures.clear();
     }
 }
 

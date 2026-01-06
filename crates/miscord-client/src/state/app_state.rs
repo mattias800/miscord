@@ -70,6 +70,12 @@ pub struct AppStateInner {
 
     // Video settings
     pub selected_video_device: Option<u32>, // Device index
+
+    // SFU state
+    pub sfu_answer: Option<String>,
+    pub sfu_renegotiate: Option<String>,
+    pub pending_sfu_ice_candidates: Vec<SfuIceCandidate>,
+    pub sfu_tracks: HashMap<Uuid, Vec<SfuTrackInfo>>, // user_id -> tracks
 }
 
 impl Default for AppStateInner {
@@ -107,6 +113,10 @@ impl Default for AppStateInner {
             gate_enabled: true,
             pending_invite_code: None,
             selected_video_device: None,
+            sfu_answer: None,
+            sfu_renegotiate: None,
+            pending_sfu_ice_candidates: Vec::new(),
+            sfu_tracks: HashMap::new(),
         }
     }
 }
@@ -121,6 +131,19 @@ pub struct RtcSignal {
 pub struct IceCandidate {
     pub from_user_id: Uuid,
     pub candidate: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SfuIceCandidate {
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_mline_index: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SfuTrackInfo {
+    pub track_id: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +377,73 @@ impl AppState {
     pub async fn take_pending_ice_candidates(&self) -> Vec<IceCandidate> {
         let mut state = self.inner.write().await;
         std::mem::take(&mut state.pending_ice_candidates)
+    }
+
+    // SFU methods
+    pub async fn set_sfu_answer(&self, sdp: String) {
+        let mut state = self.inner.write().await;
+        state.sfu_answer = Some(sdp);
+    }
+
+    pub async fn take_sfu_answer(&self) -> Option<String> {
+        let mut state = self.inner.write().await;
+        state.sfu_answer.take()
+    }
+
+    pub async fn set_sfu_renegotiate(&self, sdp: String) {
+        let mut state = self.inner.write().await;
+        state.sfu_renegotiate = Some(sdp);
+    }
+
+    pub async fn take_sfu_renegotiate(&self) -> Option<String> {
+        let mut state = self.inner.write().await;
+        state.sfu_renegotiate.take()
+    }
+
+    pub async fn add_sfu_ice_candidate(
+        &self,
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    ) {
+        let mut state = self.inner.write().await;
+        state.pending_sfu_ice_candidates.push(SfuIceCandidate {
+            candidate,
+            sdp_mid,
+            sdp_mline_index,
+        });
+    }
+
+    pub async fn take_sfu_ice_candidates(&self) -> Vec<SfuIceCandidate> {
+        let mut state = self.inner.write().await;
+        std::mem::take(&mut state.pending_sfu_ice_candidates)
+    }
+
+    pub async fn sfu_track_added(&self, user_id: Uuid, track_id: String, kind: String) {
+        let mut state = self.inner.write().await;
+        state
+            .sfu_tracks
+            .entry(user_id)
+            .or_default()
+            .push(SfuTrackInfo { track_id, kind });
+    }
+
+    pub async fn sfu_track_removed(&self, user_id: Uuid, track_id: String) {
+        let mut state = self.inner.write().await;
+        if let Some(tracks) = state.sfu_tracks.get_mut(&user_id) {
+            tracks.retain(|t| t.track_id != track_id);
+            if tracks.is_empty() {
+                state.sfu_tracks.remove(&user_id);
+            }
+        }
+    }
+
+    pub async fn clear_sfu_state(&self) {
+        let mut state = self.inner.write().await;
+        state.sfu_answer = None;
+        state.sfu_renegotiate = None;
+        state.pending_sfu_ice_candidates.clear();
+        state.sfu_tracks.clear();
     }
 }
 

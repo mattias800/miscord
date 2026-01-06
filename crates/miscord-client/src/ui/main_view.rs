@@ -159,7 +159,7 @@ impl MainView {
         // Main content area - show voice channel view or chat view
         egui::CentralPanel::default().show(ctx, |ui| {
             if in_voice {
-                self.voice_channel_view.show(ui, ctx, state, runtime);
+                self.voice_channel_view.show(ui, ctx, state, network, runtime);
             } else {
                 self.chat_view.show(ui, state, network, runtime);
             }

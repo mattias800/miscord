@@ -1,4 +1,5 @@
 use crate::services::{channel::ChannelService, message::MessageService, user::UserService};
+use crate::sfu::SfuSessionManager;
 use crate::ws::connections::ConnectionManager;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ pub struct AppState {
     pub user_service: UserService,
     pub channel_service: ChannelService,
     pub message_service: MessageService,
+    pub sfu: Arc<SfuSessionManager>,
 }
 
 impl AppState {
@@ -64,6 +66,16 @@ impl AppState {
         let channel_service = ChannelService::new(db.clone());
         let message_service = MessageService::new(db.clone());
 
+        // Create SFU session manager with ICE servers from config
+        let turn_servers: Vec<(String, String, String)> = config
+            .turn_servers
+            .iter()
+            .map(|t| (t.url.clone(), t.username.clone(), t.credential.clone()))
+            .collect();
+
+        let sfu = SfuSessionManager::new(config.stun_servers.clone(), turn_servers)
+            .expect("Failed to create SFU session manager");
+
         Self {
             config,
             db,
@@ -71,6 +83,7 @@ impl AppState {
             user_service,
             channel_service,
             message_service,
+            sfu: Arc::new(sfu),
         }
     }
 }

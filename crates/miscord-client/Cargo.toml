@@ -4,10 +4,15 @@ description = "Desktop client for Miscord with voice, video, and screen sharing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "miscord"
 
 [[bin]]
 name = "miscord"
 path = "src/main.rs"
+
+[[bin]]
+name = "sfu-test"
+path = "src/bin/sfu_test.rs"
 
 [dependencies]
 # Workspace dependencies

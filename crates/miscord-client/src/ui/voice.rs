@@ -70,13 +70,22 @@ impl VoicePanel {
             // Video button
             let video_label = if is_video { "📹" } else { "📷" };
             if ui.button(video_label).on_hover_text("Toggle Video").clicked() {
-                let state = state.clone();
-                let network = network.clone();
-                runtime.spawn(async move {
-                    let new_video = !is_video;
-                    if network.update_voice_state(None, None, Some(new_video), None).await.is_ok() {
-                        let mut s = state.write().await;
-                        s.is_video_enabled = new_video;
+                tracing::info!("Video button clicked! Current state: {}", is_video);
+                let new_video = !is_video;
+                let state_clone = state.clone();
+                let network_clone = network.clone();
+                runtime.block_on(async move {
+                    tracing::info!("Toggling video to: {}", new_video);
+                    match network_clone.update_voice_state(None, None, Some(new_video), None).await {
+                        Ok(_) => {
+                            tracing::info!("Video state updated on server, setting local state to {}", new_video);
+                            let mut s = state_clone.write().await;
+                            s.is_video_enabled = new_video;
+                            tracing::info!("Local state set to {}", new_video);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to update video state: {}", e);
+                        }
                     }
                 });
             }

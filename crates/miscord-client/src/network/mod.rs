@@ -65,6 +65,20 @@ impl NetworkClient {
         Ok((response.token, user))
     }
 
+    /// Validate a token by trying to get user info
+    /// Returns the user data if the token is valid
+    pub async fn validate_token(&self, server_url: &str, token: &str) -> Result<UserData> {
+        self.set_server_url(server_url).await;
+
+        let user: UserData = api::get(
+            &format!("{}/api/users/me", server_url),
+            Some(token),
+        )
+        .await?;
+
+        Ok(user)
+    }
+
     pub async fn register(&self, server_url: &str, request: RegisterRequest) -> Result<RegisterResponse> {
         self.set_server_url(server_url).await;
         api::post(&format!("{}/api/auth/register", server_url), &request, None).await
@@ -322,4 +336,59 @@ impl NetworkClient {
         )
         .await
     }
+
+    // SFU (Selective Forwarding Unit) for video streaming
+
+    /// Get ICE servers configuration for WebRTC
+    pub async fn get_ice_servers(&self) -> Result<Vec<IceServerConfig>> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        #[derive(Deserialize)]
+        struct IceServersResponse {
+            ice_servers: Vec<IceServerConfig>,
+        }
+
+        let response: IceServersResponse = api::get(
+            &format!("{}/api/webrtc/ice-servers", server_url),
+            token.as_deref(),
+        )
+        .await?;
+
+        Ok(response.ice_servers)
+    }
+
+    /// Send SFU offer via WebSocket
+    pub async fn send_sfu_offer(&self, channel_id: Uuid, sdp: String) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.send_sfu_offer(channel_id, sdp).await;
+        }
+    }
+
+    /// Send SFU answer via WebSocket
+    pub async fn send_sfu_answer(&self, sdp: String) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.send_sfu_answer(sdp).await;
+        }
+    }
+
+    /// Send SFU ICE candidate via WebSocket
+    pub async fn send_sfu_ice_candidate(
+        &self,
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    ) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.send_sfu_ice_candidate(candidate, sdp_mid, sdp_mline_index).await;
+        }
+    }
+}
+
+/// ICE server configuration for WebRTC
+#[derive(Debug, Clone, Deserialize)]
+pub struct IceServerConfig {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
 }
