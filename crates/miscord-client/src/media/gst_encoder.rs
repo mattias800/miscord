@@ -108,12 +108,13 @@ fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
             // VideoToolbox encoder (macOS)
             // vtenc_h264_hw is hardware-only, vtenc_h264 may fall back to software
             // allow-frame-reordering=false disables B-frames for lower latency
+            // realtime=true minimizes internal buffering for lowest latency
             // max-keyframe-interval ensures keyframes every second
             // name=encoder allows us to find it later for force-keyframe
             // h264parse config-interval=-1 inserts SPS/PPS before every IDR
             // stream-format=byte-stream ensures Annex B output (start codes, not length prefixed)
             format!(
-                "{} name=encoder allow-frame-reordering=false max-keyframe-interval=30 \
+                "{} name=encoder allow-frame-reordering=false realtime=true max-keyframe-interval=30 \
                  max-keyframe-interval-duration=1000000000 bitrate={} ! \
                  h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 encoder,
@@ -361,7 +362,9 @@ impl GstH264Encoder {
 
         self.appsrc.push_buffer(buffer)?;
 
-        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(50)) {
+        // Timeout should be enough for encoder to produce output but not block too long
+        // With realtime=true, encoder should produce output within one frame duration
+        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(33)) {
             Some(sample) => {
                 let buffer = sample.buffer().ok_or_else(|| anyhow!("No buffer in sample"))?;
                 let map = buffer.map_readable()?;
@@ -480,16 +483,20 @@ impl GstH264Decoder {
 
         let decoder_segment = build_decoder_pipeline(decoder);
 
-        // Pipeline for RTP H.264: appsrc → rtph264depay → h264parse → hw_decoder → videoconvert → appsink
+        // Pipeline for RTP H.264: appsrc → h264parse → hw_decoder → videoconvert → appsink
         // Note: We manually depayload RTP because GStreamer's rtph264depay has issues with
         // RTP header extensions used by webrtc-rs. Instead, we feed raw H.264 NAL units.
+        // Low latency settings:
+        // - appsrc: is-live=true, do-timestamp=true, max-bytes=0 for unbounded buffer
+        // - h264parse: config-interval=0 disables re-inserting config data
+        // - appsink: sync=false, max-buffers=1, drop=true for lowest latency
         let pipeline_str = format!(
-            "appsrc name=src format=time is-live=true do-timestamp=true \
+            "appsrc name=src format=time is-live=true do-timestamp=true max-bytes=0 \
              caps=video/x-h264,stream-format=byte-stream,alignment=nal ! \
-             h264parse ! \
+             h264parse config-interval=0 ! \
              {} ! \
              videoconvert ! video/x-raw,format=RGB ! \
-             appsink name=sink sync=false max-buffers=1 drop=true",
+             appsink name=sink sync=false max-buffers=1 drop=true emit-signals=false",
             decoder_segment
         );
 
@@ -762,7 +769,8 @@ impl GstH264Decoder {
             }
         }
 
-        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(10)) {
+        // Very low timeout for minimal latency - hardware decoder is fast
+        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(1)) {
             Some(sample) => {
                 let buffer = sample.buffer().ok_or_else(|| anyhow!("No buffer in sample"))?;
                 let caps = sample.caps().ok_or_else(|| anyhow!("No caps in sample"))?;

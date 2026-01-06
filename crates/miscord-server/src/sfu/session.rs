@@ -103,6 +103,16 @@ impl VoiceChannelSession {
             .unwrap_or_default()
     }
 
+    /// Check if a router exists for a user and track type
+    pub async fn has_router(&self, user_id: Uuid, track_type: TrackType) -> bool {
+        self.track_routers
+            .read()
+            .await
+            .get(&user_id)
+            .map(|routers| routers.iter().any(|r| r.track_type() == track_type))
+            .unwrap_or(false)
+    }
+
     /// Subscribe a user to another user's screen share
     pub async fn subscribe_to_screen(&self, subscriber_id: Uuid, screen_owner_id: Uuid) {
         self.screen_subscriptions

@@ -690,10 +690,8 @@ async fn handle_remote_track(
         track.id()
     );
 
-    // Wait briefly for the track's RTP receiver to be fully initialized
-    // This is needed because the on_track callback can fire before the
-    // internal receiver is ready (reduced from 500ms for lower latency)
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Note: Removed the 100ms delay that was here - it added unnecessary latency.
+    // The RTP read loop will naturally wait for packets to arrive.
 
     // Create H.264 decoder for this track (hardware accelerated)
     let decoder = match GstVp8Decoder::new() {

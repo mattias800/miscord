@@ -440,11 +440,58 @@ async fn handle_sfu_offer(
         return;
     }
 
-    // Note: We used to have transceiver polling here as a workaround for on_track
-    // not firing during renegotiation. However, re-registering the on_track callback
-    // on the existing peer connection (done above) properly handles renegotiation.
-    // The transceiver polling caused issues because receiver.tracks() returns stale
-    // track references that close immediately when read from.
+    // Workaround: on_track may not fire during renegotiation in webrtc-rs
+    // Poll transceivers to find new remote tracks manually
+    if is_renegotiation {
+        let transceivers = peer_connection.get_transceivers().await;
+        tracing::info!("Checking {} transceivers for new remote tracks during renegotiation", transceivers.len());
+
+        for (idx, transceiver) in transceivers.iter().enumerate() {
+            let receiver = transceiver.receiver().await;
+            let tracks = receiver.tracks().await;
+            let mid = transceiver.mid();
+            let direction = transceiver.direction();
+
+            tracing::debug!(
+                "Transceiver {}: mid={:?}, direction={:?}, tracks={}",
+                idx, mid, direction, tracks.len()
+            );
+
+            for track in tracks {
+                let stream_id = track.stream_id().to_string();
+                let track_id = track.id().to_string();
+
+                // Skip local tracks
+                if stream_id.starts_with("stream-local") || track_id.is_empty() {
+                    continue;
+                }
+
+                // Detect track type from stream ID
+                let track_type = if stream_id.contains("screen") {
+                    TrackType::Screen
+                } else {
+                    TrackType::Webcam
+                };
+
+                // Check if we already have a router for this track type from this user
+                let already_handled = if let Some(session) = state.sfu.get_session(channel_id).await {
+                    session.has_router(user_id, track_type).await
+                } else {
+                    false
+                };
+
+                if !already_handled {
+                    tracing::info!(
+                        "Found new {:?} track via transceiver polling: {} from stream {} for user {}",
+                        track_type, track_id, stream_id, user_id
+                    );
+
+                    // Handle the track (creates router and notifies subscribers)
+                    handle_incoming_track(state.clone(), channel_id, user_id, track.clone()).await;
+                }
+            }
+        }
+    }
 
     // Add existing tracks from other publishers to this peer connection
     // Only for new connections, not renegotiations
