@@ -334,6 +334,9 @@ impl ChatView {
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
+                        // Constrain width to prevent horizontal overflow
+                        ui.set_width(ui.available_width());
+
                         let mut prev_message: Option<&MessageData> = None;
 
                         for message in messages.iter() {

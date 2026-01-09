@@ -157,16 +157,25 @@ fn render_inline_markdown(ui: &mut Ui, text: &str) {
     let segments = parse_inline_formatting(text);
 
     if segments.is_empty() {
-        ui.label(RichText::new(text).color(COLOR_TEXT));
+        ui.add(egui::Label::new(RichText::new(text).color(COLOR_TEXT)).wrap());
         return;
     }
 
-    // Use a horizontal layout for inline segments
+    // Use a horizontal layout for inline segments with wrapping
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0; // Keep words together
         for segment in segments {
             match segment {
                 InlineSegment::Text(s) => {
-                    ui.label(RichText::new(s).color(COLOR_TEXT));
+                    // Split by spaces to allow word wrapping
+                    for (i, word) in s.split(' ').enumerate() {
+                        if i > 0 {
+                            ui.add_space(4.0); // Space between words
+                        }
+                        if !word.is_empty() {
+                            ui.label(RichText::new(word).color(COLOR_TEXT));
+                        }
+                    }
                 }
                 InlineSegment::Bold(s) => {
                     ui.label(RichText::new(s).strong().color(COLOR_TEXT));
