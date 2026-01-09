@@ -217,15 +217,15 @@ Another agent is currently working on server, community, and user account manage
 - [x] Initial plan created
 - [x] Phase 1: Quick Wins
   - [x] Date separators (shows "Today", "Yesterday", or full date between messages from different days)
-  - [ ] Selected conversation highlight (DMs show selected state) - Not yet implemented
+  - [ ] Selected conversation highlight (DMs show selected state) - DM feature not fully implemented
   - [x] Relative timestamps with full timestamp tooltip ("Just now", "2m ago", etc.)
-  - [ ] Message formatting toolbar (Bold, Italic, Code buttons) - Not yet implemented
-- [x] Phase 2: High Impact Features (partial)
+  - [x] Message formatting toolbar (Bold, Italic, Strikethrough, Code, Code block, Link buttons)
+- [x] Phase 2: High Impact Features
   - [x] Typing indicators (shows "User is typing..." via WebSocket events)
   - [x] Unread indicators for text channels (badge with count, bright text, mark-as-read on select)
   - [x] Message replies/threading - Slack-style threads with side panel, real-time updates
-  - [ ] Link previews - Not yet implemented
-  - [ ] User mentions (@username) - Not yet implemented
+  - [x] Link previews - OpenGraph endpoint, clickable URLs in messages
+  - [x] User mentions (@username) - autocomplete dropdown, keyboard navigation, highlight in messages
   - [x] Smart auto-scroll - Uses egui's stick_to_bottom
 
 ### In Progress
