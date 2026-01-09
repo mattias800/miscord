@@ -223,17 +223,27 @@ Another agent is currently working on server, community, and user account manage
 - [x] Phase 2: High Impact Features (partial)
   - [x] Typing indicators (shows "User is typing..." via WebSocket events)
   - [ ] Unread indicators for text channels - Not yet implemented
-  - [x] Message replies/threading (shows quoted preview with ┌─ @author)
+  - [x] Message replies/threading - Slack-style threads with side panel, real-time updates
   - [ ] Link previews - Not yet implemented
   - [ ] User mentions (@username) - Not yet implemented
-  - [ ] Smart auto-scroll - Uses egui's stick_to_bottom
+  - [x] Smart auto-scroll - Uses egui's stick_to_bottom
 
 ### In Progress
 - [ ] Phase 3: Medium Impact Features
-  - [x] Message reactions display (shows emoji with counts, real-time sync via WebSocket)
+  - [x] Message reactions (emoji picker, counts, real-time sync via WebSocket, user ID tracking)
   - [ ] File attachments - Not yet implemented
   - [ ] Pinned messages - Not yet implemented
+  - [ ] Infinite scroll / Message history - Not yet implemented
+  - [ ] Message search - Not yet implemented
 
 ### Not Started
 - [ ] Phase 4: Nice to Have
   - [ ] GIF support (Tenor API integration, picker UI, inline display)
+  - [ ] Delivery status indicators
+  - [ ] Voice/Video calls in DMs
+  - [ ] Draft messages
+  - [ ] Compact mode
+  - [ ] Keyboard navigation
+
+### Other Improvements
+- [x] UI state persistence (community/channel selection, collapsed sections)
