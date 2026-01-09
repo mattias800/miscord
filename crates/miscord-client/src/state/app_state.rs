@@ -230,11 +230,13 @@ impl AppState {
 
     pub async fn add_message(&self, message: MessageData) {
         let mut state = self.inner.write().await;
+        // Messages are stored in DESC order (newest first)
+        // Insert at front so newest message is at index 0
         state
             .messages
             .entry(message.channel_id)
             .or_default()
-            .push(message);
+            .insert(0, message);
     }
 
     pub async fn set_communities(&self, communities: Vec<CommunityData>) {
