@@ -274,6 +274,16 @@ impl NetworkClient {
     }
 
     pub async fn send_message_with_reply(&self, channel_id: Uuid, content: &str, reply_to_id: Option<Uuid>) -> Result<MessageData> {
+        self.send_message_with_attachments(channel_id, content, reply_to_id, vec![]).await
+    }
+
+    pub async fn send_message_with_attachments(
+        &self,
+        channel_id: Uuid,
+        content: &str,
+        reply_to_id: Option<Uuid>,
+        attachment_ids: Vec<Uuid>,
+    ) -> Result<MessageData> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
@@ -282,6 +292,8 @@ impl NetworkClient {
             content: String,
             #[serde(skip_serializing_if = "Option::is_none")]
             reply_to_id: Option<Uuid>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            attachment_ids: Vec<Uuid>,
         }
 
         api::post(
@@ -289,10 +301,51 @@ impl NetworkClient {
             &CreateMessage {
                 content: content.to_string(),
                 reply_to_id,
+                attachment_ids,
             },
             token.as_deref(),
         )
         .await
+    }
+
+    /// Upload files to a channel
+    pub async fn upload_files(&self, channel_id: Uuid, files: Vec<(String, String, Vec<u8>)>) -> Result<Vec<miscord_protocol::AttachmentData>> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        let client = reqwest::Client::new();
+        let mut form = reqwest::multipart::Form::new();
+
+        for (filename, content_type, data) in files {
+            let part = reqwest::multipart::Part::bytes(data)
+                .file_name(filename)
+                .mime_str(&content_type)
+                .map_err(|e| anyhow::anyhow!("Invalid content type: {}", e))?;
+            form = form.part("file", part);
+        }
+
+        let mut request = client
+            .post(format!("{}/api/channels/{}/upload", server_url, channel_id))
+            .multipart(form);
+
+        if let Some(token) = token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Upload failed: {}", error_text));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct UploadResponse {
+            attachments: Vec<miscord_protocol::AttachmentData>,
+        }
+
+        let upload_response: UploadResponse = response.json().await?;
+        Ok(upload_response.attachments)
     }
 
     pub async fn update_message(&self, message_id: Uuid, content: &str) -> Result<MessageData> {
@@ -578,6 +631,47 @@ impl NetworkClient {
         let (width, height) = rgba.dimensions();
 
         Ok((rgba.into_raw(), width, height))
+    }
+
+    /// Fetch an attachment image from the server
+    /// attachment_url should be a relative path like "/api/files/{id}"
+    pub async fn fetch_attachment_image(&self, attachment_url: &str) -> Result<(Vec<u8>, u32, u32)> {
+        let server_url = self.get_server_url().await;
+        let full_url = format!("{}{}", server_url, attachment_url);
+        let token = self.get_token().await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let mut request = client.get(&full_url);
+        if let Some(token) = token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = request.send().await?;
+        let bytes = response.bytes().await?;
+
+        // Decode the image
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to decode image: {}", e))?;
+
+        // Resize if too large (max 500px width for attachment previews)
+        let img = if img.width() > 500 {
+            img.resize(500, 500, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+
+        let rgba = img.to_rgba8();
+        let (width, height) = rgba.dimensions();
+
+        Ok((rgba.into_raw(), width, height))
+    }
+
+    /// Get the base server URL (e.g., "http://localhost:3000")
+    pub async fn get_base_url(&self) -> String {
+        self.get_server_url().await
     }
 }
 

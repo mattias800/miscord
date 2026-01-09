@@ -20,7 +20,7 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct MessageAttachment {
     pub id: Uuid,
-    pub message_id: Uuid,
+    pub message_id: Option<Uuid>,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -41,6 +41,8 @@ pub struct MessageReaction {
 pub struct CreateMessage {
     pub content: String,
     pub reply_to_id: Option<Uuid>,
+    #[serde(default)]
+    pub attachment_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]

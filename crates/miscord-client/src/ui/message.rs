@@ -82,6 +82,8 @@ pub struct MessageRendererState {
     pub emoji_picker_open_for: Option<Uuid>,
     /// Texture cache for link preview images (url -> texture handle)
     pub link_preview_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Texture cache for attachment images (url -> texture handle)
+    pub attachment_textures: std::collections::HashMap<String, egui::TextureHandle>,
 }
 
 impl MessageRendererState {
@@ -89,7 +91,25 @@ impl MessageRendererState {
         Self {
             emoji_picker_open_for: None,
             link_preview_textures: std::collections::HashMap::new(),
+            attachment_textures: std::collections::HashMap::new(),
         }
+    }
+}
+
+/// Format file size in human-readable format
+pub fn format_file_size(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = 1024 * 1024;
+    const GB: i64 = 1024 * 1024 * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
@@ -314,6 +334,14 @@ pub fn render_message(
                     render_link_preview(ui, &og_data, state, network, runtime, renderer_state);
                 }
             }
+        }
+    }
+
+    // Display attachments
+    if !message.attachments.is_empty() {
+        ui.add_space(4.0);
+        for attachment in &message.attachments {
+            render_attachment(ui, attachment, state, network, runtime, renderer_state);
         }
     }
 
@@ -680,4 +708,257 @@ fn render_link_preview(
                 ui.add_space(12.0);
             });
         });
+}
+
+/// Render a file attachment (image inline, other files as download cards)
+fn render_attachment(
+    ui: &mut egui::Ui,
+    attachment: &miscord_protocol::AttachmentData,
+    state: &AppState,
+    network: &NetworkClient,
+    runtime: &tokio::runtime::Runtime,
+    renderer_state: &mut MessageRendererState,
+) {
+    let is_image = attachment.content_type.starts_with("image/");
+
+    if is_image {
+        render_image_attachment(ui, attachment, state, network, runtime, renderer_state);
+    } else {
+        render_file_attachment(ui, attachment, network, runtime);
+    }
+}
+
+/// Render an image attachment inline
+fn render_image_attachment(
+    ui: &mut egui::Ui,
+    attachment: &miscord_protocol::AttachmentData,
+    state: &AppState,
+    network: &NetworkClient,
+    runtime: &tokio::runtime::Runtime,
+    renderer_state: &mut MessageRendererState,
+) {
+    // Use attachment URL as cache key
+    let cache_key = &attachment.url;
+
+    // Try to get cached image data
+    let cached = state.get_image_sync(cache_key);
+
+    if cached.is_none() {
+        // Not cached - trigger fetch if not already pending
+        if state.mark_image_pending_sync(cache_key) == Some(true) {
+            let network = network.clone();
+            let state = state.clone();
+            let url = attachment.url.clone();
+            runtime.spawn(async move {
+                match network.fetch_attachment_image(&url).await {
+                    Ok((bytes, width, height)) => {
+                        state.set_image(url, bytes, width, height).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch attachment image {}: {}", url, e);
+                        state.mark_image_failed(&url).await;
+                    }
+                }
+            });
+        }
+    }
+
+    // Render the image if we have cached data
+    if let Some(cached_img) = cached {
+        let (rgba_data, width, height) = cached_img.as_ref();
+
+        // Get or create texture from renderer state cache
+        if !renderer_state.attachment_textures.contains_key(cache_key) {
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [*width as usize, *height as usize],
+                rgba_data,
+            );
+            let handle = ui.ctx().load_texture(
+                format!("attachment_{}", attachment.id),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            renderer_state.attachment_textures.insert(cache_key.clone(), handle);
+        }
+
+        if let Some(texture) = renderer_state.attachment_textures.get(cache_key) {
+            // Calculate display size (max 400px wide, maintain aspect ratio)
+            let aspect = *width as f32 / *height as f32;
+            let display_width = (*width as f32).min(400.0);
+            let display_height = display_width / aspect;
+
+            ui.add_space(4.0);
+
+            // Make the image clickable to open in browser/viewer
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(display_width, display_height),
+                egui::Sense::click(),
+            );
+
+            if ui.is_rect_visible(rect) {
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                // Show slight border on hover
+                if response.hovered() {
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::Rounding::same(4.0),
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(88, 101, 242)),
+                    );
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+            }
+
+            // Show filename and size on hover
+            response.on_hover_text(format!(
+                "{} ({})",
+                attachment.filename,
+                format_file_size(attachment.size_bytes)
+            ));
+
+            // Click would open in browser - but for now we don't have full URLs
+            // In a future improvement, we could download the file to temp and open it
+        }
+    } else {
+        // Show loading placeholder
+        ui.add_space(4.0);
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(38, 40, 46))
+            .rounding(egui::Rounding::same(4.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new(format!("Loading {}...", attachment.filename))
+                            .color(egui::Color32::from_rgb(180, 180, 180))
+                    );
+                });
+            });
+    }
+}
+
+/// Render a non-image file attachment as a download card
+fn render_file_attachment(
+    ui: &mut egui::Ui,
+    attachment: &miscord_protocol::AttachmentData,
+    network: &NetworkClient,
+    runtime: &tokio::runtime::Runtime,
+) {
+    ui.add_space(4.0);
+
+    // Get file extension for icon selection
+    let extension = attachment.filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Choose icon based on file type
+    let icon = match extension.as_str() {
+        "pdf" => "📄",
+        "doc" | "docx" => "📝",
+        "xls" | "xlsx" => "📊",
+        "ppt" | "pptx" => "📽",
+        "zip" | "rar" | "7z" | "tar" | "gz" => "📦",
+        "mp3" | "wav" | "ogg" | "flac" => "🎵",
+        "mp4" | "mov" | "avi" | "mkv" | "webm" => "🎬",
+        "txt" | "md" | "json" | "xml" | "yaml" | "yml" => "📃",
+        "rs" | "py" | "js" | "ts" | "java" | "c" | "cpp" | "h" | "go" => "💻",
+        _ => "📎",
+    };
+
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(38, 40, 46))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui, |ui| {
+            ui.set_min_width(200.0);
+            ui.set_max_width(300.0);
+
+            ui.horizontal(|ui| {
+                // File icon
+                ui.label(egui::RichText::new(icon).size(24.0));
+
+                ui.add_space(8.0);
+
+                ui.vertical(|ui| {
+                    // Filename (clickable)
+                    let filename_label = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&attachment.filename)
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(96, 165, 250))
+                        )
+                        .sense(egui::Sense::click())
+                    );
+
+                    if filename_label.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+
+                    if filename_label.clicked() {
+                        // Trigger download
+                        let network = network.clone();
+                        let url = attachment.url.clone();
+                        let filename = attachment.filename.clone();
+                        runtime.spawn(async move {
+                            if let Err(e) = download_attachment(&network, &url, &filename).await {
+                                tracing::warn!("Failed to download attachment: {}", e);
+                            }
+                        });
+                    }
+
+                    // File size
+                    ui.label(
+                        egui::RichText::new(format_file_size(attachment.size_bytes))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140))
+                    );
+                });
+            });
+        });
+}
+
+/// Download an attachment and save to the user's downloads folder
+async fn download_attachment(
+    network: &NetworkClient,
+    attachment_url: &str,
+    filename: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let server_url = network.get_base_url().await;
+    let full_url = format!("{}{}", server_url, attachment_url);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+
+    let response = client.get(&full_url).send().await?;
+    let bytes = response.bytes().await?;
+
+    // Get downloads directory
+    let downloads_dir = dirs::download_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let file_path = downloads_dir.join(filename);
+
+    // Write file
+    std::fs::write(&file_path, &bytes)
+        .with_context(|| format!("Failed to write file to {:?}", file_path))?;
+
+    tracing::info!("Downloaded attachment to {:?}", file_path);
+
+    // Try to open the containing folder
+    if let Err(e) = open::that(&downloads_dir) {
+        tracing::warn!("Failed to open downloads folder: {}", e);
+    }
+
+    Ok(())
 }

@@ -187,5 +187,7 @@ echo ""
 echo -e "Press ${RED}Ctrl+C${NC} to stop all processes"
 echo ""
 
-# Wait for any process to exit
-wait
+# Wait indefinitely (trap will handle Ctrl+C)
+while true; do
+    sleep 1
+done

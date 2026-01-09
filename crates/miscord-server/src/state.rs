@@ -1,7 +1,11 @@
-use crate::services::{channel::ChannelService, message::MessageService, user::UserService};
+use crate::services::{
+    attachment::AttachmentService, channel::ChannelService, message::MessageService,
+    user::UserService,
+};
 use crate::sfu::SfuSessionManager;
 use crate::ws::connections::ConnectionManager;
 use sqlx::PgPool;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -11,6 +15,8 @@ pub struct Config {
     pub jwt_secret: String,
     pub stun_servers: Vec<String>,
     pub turn_servers: Vec<TurnServer>,
+    pub upload_dir: PathBuf,
+    pub base_url: String,
 }
 
 #[derive(Clone)]
@@ -38,12 +44,21 @@ impl Config {
             .map(|s| s.split(',').map(String::from).collect())
             .unwrap_or_else(|_| vec!["stun:stun.l.google.com:19302".to_string()]);
 
+        let upload_dir = std::env::var("UPLOAD_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./uploads"));
+
+        let base_url = std::env::var("BASE_URL")
+            .unwrap_or_else(|_| format!("http://{}", bind_address));
+
         Ok(Config {
             bind_address,
             database_url,
             jwt_secret,
             stun_servers,
             turn_servers: vec![], // Configure via env if needed
+            upload_dir,
+            base_url,
         })
     }
 }
@@ -56,6 +71,7 @@ pub struct AppState {
     pub user_service: UserService,
     pub channel_service: ChannelService,
     pub message_service: MessageService,
+    pub attachment_service: AttachmentService,
     pub sfu: Arc<SfuSessionManager>,
 }
 
@@ -65,6 +81,11 @@ impl AppState {
         let user_service = UserService::new(db.clone());
         let channel_service = ChannelService::new(db.clone());
         let message_service = MessageService::new(db.clone());
+        let attachment_service = AttachmentService::new(
+            db.clone(),
+            config.upload_dir.clone(),
+            config.base_url.clone(),
+        );
 
         // Create SFU session manager with ICE servers from config
         let turn_servers: Vec<(String, String, String)> = config
@@ -83,6 +104,7 @@ impl AppState {
             user_service,
             channel_service,
             message_service,
+            attachment_service,
             sfu: Arc::new(sfu),
         }
     }

@@ -28,7 +28,7 @@ pub async fn list_messages(
         .list_by_channel(channel_id, query.before, limit)
         .await?;
 
-    // Get message IDs for batch reaction lookup
+    // Get message IDs for batch reaction and attachment lookup
     let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
 
     // Get reactions for all messages in one query
@@ -38,7 +38,32 @@ pub async fn list_messages(
         .await
         .unwrap_or_default();
 
-    // Convert to MessageData with author names and reactions
+    // Get attachments for all messages in one query
+    let attachments_list = state
+        .attachment_service
+        .get_by_message_ids(&message_ids)
+        .await
+        .unwrap_or_default();
+
+    // Group attachments by message_id (skip orphan attachments without message_id)
+    let mut attachments_map: std::collections::HashMap<Uuid, Vec<miscord_protocol::AttachmentData>> =
+        std::collections::HashMap::new();
+    for att in attachments_list {
+        if let Some(message_id) = att.message_id {
+            attachments_map
+                .entry(message_id)
+                .or_default()
+                .push(miscord_protocol::AttachmentData {
+                    id: att.id,
+                    filename: att.filename,
+                    content_type: att.content_type,
+                    size_bytes: att.size_bytes,
+                    url: att.url,
+                });
+        }
+    }
+
+    // Convert to MessageData with author names, reactions, and attachments
     let mut result = Vec::with_capacity(messages.len());
     for msg in messages {
         let author_name = state
@@ -62,6 +87,9 @@ pub async fn list_messages(
             })
             .unwrap_or_default();
 
+        // Get attachments for this message
+        let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
+
         result.push(MessageData {
             id: msg.id,
             channel_id: msg.channel_id,
@@ -71,6 +99,7 @@ pub async fn list_messages(
             edited_at: msg.edited_at,
             reply_to_id: msg.reply_to_id,
             reactions,
+            attachments,
             created_at: msg.created_at,
             thread_parent_id: msg.thread_parent_id,
             reply_count: msg.reply_count,
@@ -87,10 +116,41 @@ pub async fn create_message(
     Path(channel_id): Path<Uuid>,
     Json(input): Json<CreateMessage>,
 ) -> Result<Json<MessageData>> {
+    // Extract attachment_ids before passing to service
+    let attachment_ids = input.attachment_ids.clone();
+
     let message = state
         .message_service
         .create(channel_id, auth.user_id, input)
         .await?;
+
+    // Link attachments to the message if any were provided
+    let attachments = if !attachment_ids.is_empty() {
+        state
+            .attachment_service
+            .link_to_message(&attachment_ids, message.id)
+            .await?;
+
+        // Fetch the linked attachments
+        state
+            .attachment_service
+            .get_by_message_id(message.id)
+            .await
+            .map(|atts| {
+                atts.into_iter()
+                    .map(|a| miscord_protocol::AttachmentData {
+                        id: a.id,
+                        filename: a.filename,
+                        content_type: a.content_type,
+                        size_bytes: a.size_bytes,
+                        url: a.url,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
 
     // Get author name for the broadcast
     let author_name = state
@@ -109,6 +169,7 @@ pub async fn create_message(
         edited_at: message.edited_at,
         reply_to_id: message.reply_to_id,
         reactions: vec![], // New messages have no reactions
+        attachments,
         created_at: message.created_at,
         thread_parent_id: message.thread_parent_id,
         reply_count: message.reply_count,
@@ -161,6 +222,24 @@ pub async fn update_message(
         })
         .unwrap_or_default();
 
+    // Get attachments for the message
+    let attachments = state
+        .attachment_service
+        .get_by_message_id(message.id)
+        .await
+        .map(|atts| {
+            atts.into_iter()
+                .map(|a| miscord_protocol::AttachmentData {
+                    id: a.id,
+                    filename: a.filename,
+                    content_type: a.content_type,
+                    size_bytes: a.size_bytes,
+                    url: a.url,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let message_data = MessageData {
         id: message.id,
         channel_id: message.channel_id,
@@ -170,6 +249,7 @@ pub async fn update_message(
         edited_at: message.edited_at,
         reply_to_id: message.reply_to_id,
         reactions,
+        attachments,
         created_at: message.created_at,
         thread_parent_id: message.thread_parent_id,
         reply_count: message.reply_count,
@@ -295,7 +375,7 @@ pub async fn get_thread(
         .get_thread_replies(parent_id, limit)
         .await?;
 
-    // Get all message IDs for batch reaction lookup
+    // Get all message IDs for batch reaction and attachment lookup
     let mut all_message_ids: Vec<Uuid> = replies.iter().map(|m| m.id).collect();
     all_message_ids.push(parent_id);
 
@@ -304,6 +384,30 @@ pub async fn get_thread(
         .get_reactions_for_messages(&all_message_ids, auth.user_id)
         .await
         .unwrap_or_default();
+
+    // Get attachments for all messages
+    let attachments_list = state
+        .attachment_service
+        .get_by_message_ids(&all_message_ids)
+        .await
+        .unwrap_or_default();
+
+    let mut attachments_map: std::collections::HashMap<Uuid, Vec<miscord_protocol::AttachmentData>> =
+        std::collections::HashMap::new();
+    for att in attachments_list {
+        if let Some(message_id) = att.message_id {
+            attachments_map
+                .entry(message_id)
+                .or_default()
+                .push(miscord_protocol::AttachmentData {
+                    id: att.id,
+                    filename: att.filename,
+                    content_type: att.content_type,
+                    size_bytes: att.size_bytes,
+                    url: att.url,
+                });
+        }
+    }
 
     // Build parent MessageData
     let parent_reactions = reactions_map
@@ -319,6 +423,8 @@ pub async fn get_thread(
         })
         .unwrap_or_default();
 
+    let parent_attachments = attachments_map.remove(&parent.id).unwrap_or_default();
+
     let parent_data = MessageData {
         id: parent.id,
         channel_id: parent.channel_id,
@@ -328,6 +434,7 @@ pub async fn get_thread(
         edited_at: parent.edited_at,
         reply_to_id: parent.reply_to_id,
         reactions: parent_reactions,
+        attachments: parent_attachments,
         created_at: parent.created_at,
         thread_parent_id: parent.thread_parent_id,
         reply_count: parent.reply_count,
@@ -357,6 +464,8 @@ pub async fn get_thread(
             })
             .unwrap_or_default();
 
+        let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
+
         replies_data.push(MessageData {
             id: msg.id,
             channel_id: msg.channel_id,
@@ -366,6 +475,7 @@ pub async fn get_thread(
             edited_at: msg.edited_at,
             reply_to_id: msg.reply_to_id,
             reactions,
+            attachments,
             created_at: msg.created_at,
             thread_parent_id: msg.thread_parent_id,
             reply_count: msg.reply_count,
@@ -409,6 +519,7 @@ pub async fn create_thread_reply(
         edited_at: message.edited_at,
         reply_to_id: message.reply_to_id,
         reactions: vec![],
+        attachments: vec![], // TODO: Support attachments on thread reply creation
         created_at: message.created_at,
         thread_parent_id: message.thread_parent_id,
         reply_count: message.reply_count,

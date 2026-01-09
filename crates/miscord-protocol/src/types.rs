@@ -70,6 +70,8 @@ pub struct MessageData {
     pub reply_to_id: Option<Uuid>,
     #[serde(default)]
     pub reactions: Vec<ReactionData>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentData>,
     pub created_at: DateTime<Utc>,
     // Thread fields
     pub thread_parent_id: Option<Uuid>,

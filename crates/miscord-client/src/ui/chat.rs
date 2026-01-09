@@ -6,14 +6,21 @@ use uuid::Uuid;
 
 use crate::network::NetworkClient;
 use crate::state::AppState;
-use miscord_protocol::MessageData;
+use miscord_protocol::{AttachmentData, MessageData};
 
 use super::message::{
-    render_message, MessageAction, MessageRenderOptions, MessageRendererState, ReactionInfo,
+    format_file_size, render_message, MessageAction, MessageRenderOptions, MessageRendererState, ReactionInfo,
 };
 
 /// How often to send typing indicators (in seconds)
 const TYPING_THROTTLE_SECS: u64 = 3;
+
+/// Pending file attachment (filename, content_type, data)
+pub struct PendingAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+}
 
 pub struct ChatView {
     message_input: String,
@@ -37,6 +44,8 @@ pub struct ChatView {
     pending_cursor_pos: Option<usize>,
     /// Whether mention was dismissed with Escape (prevents immediate re-open)
     mention_dismissed: bool,
+    /// Pending file attachments to upload with the next message
+    pending_attachments: Vec<PendingAttachment>,
 }
 
 /// Get date separator text for a message
@@ -76,6 +85,7 @@ impl ChatView {
             mention_selected: 0,
             pending_cursor_pos: None,
             mention_dismissed: false,
+            pending_attachments: Vec::new(),
         }
     }
 
@@ -86,6 +96,9 @@ impl ChatView {
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
+        // Handle dropped files (drag-and-drop)
+        self.handle_dropped_files(ui);
+
         let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members) = runtime.block_on(async {
             let s = state.read().await;
             let channel_id = s.current_channel_id;
@@ -367,9 +380,88 @@ impl ChatView {
                     }
                 }
 
+                // Show pending attachments above input
+                if !self.pending_attachments.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        let mut to_remove = Vec::new();
+                        for (idx, attachment) in self.pending_attachments.iter().enumerate() {
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(45, 48, 54))
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::same(8.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        // File icon
+                                        let icon = if attachment.content_type.starts_with("image/") {
+                                            "🖼"
+                                        } else {
+                                            "📎"
+                                        };
+                                        ui.label(egui::RichText::new(icon).size(16.0));
+
+                                        // Filename (truncated)
+                                        let display_name: String = if attachment.filename.len() > 20 {
+                                            format!("{}...", &attachment.filename[..17])
+                                        } else {
+                                            attachment.filename.clone()
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(&display_name)
+                                                .size(12.0)
+                                                .color(egui::Color32::from_rgb(200, 200, 200))
+                                        );
+
+                                        // Size
+                                        ui.label(
+                                            egui::RichText::new(format_file_size(attachment.data.len() as i64))
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(140, 140, 140))
+                                        );
+
+                                        // Remove button
+                                        if ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new("✕")
+                                                    .size(12.0)
+                                                    .color(egui::Color32::from_rgb(180, 180, 180))
+                                            )
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .min_size(egui::vec2(20.0, 20.0))
+                                        ).on_hover_text("Remove attachment").clicked() {
+                                            to_remove.push(idx);
+                                        }
+                                    });
+                                });
+                            ui.add_space(4.0);
+                        }
+                        // Remove attachments marked for removal
+                        for idx in to_remove.into_iter().rev() {
+                            self.pending_attachments.remove(idx);
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+
                 // Message input
                 let text_edit_id = ui.make_persistent_id("chat_message_input");
                 let input_row_response = ui.horizontal(|ui| {
+                    // Attachment button (only when not editing)
+                    if self.editing_message.is_none() {
+                        let attach_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new("📎")
+                                    .size(18.0)
+                            )
+                            .fill(egui::Color32::TRANSPARENT)
+                            .min_size(egui::vec2(32.0, 32.0))
+                            .rounding(egui::Rounding::same(4.0))
+                        );
+
+                        if attach_btn.on_hover_text("Attach file").clicked() {
+                            self.open_file_picker();
+                        }
+                    }
+
                     let hint_text = if self.editing_message.is_some() {
                         "Edit message (Shift+Enter for new line)".to_string()
                     } else {
@@ -631,12 +723,19 @@ impl ChatView {
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
-        if self.message_input.trim().is_empty() {
+        // Allow sending if there's text OR attachments
+        if self.message_input.trim().is_empty() && self.pending_attachments.is_empty() {
             return;
         }
 
         let content = self.message_input.clone();
         self.message_input.clear();
+
+        // Take pending attachments
+        let attachments: Vec<(String, String, Vec<u8>)> = self.pending_attachments
+            .drain(..)
+            .map(|a| (a.filename, a.content_type, a.data))
+            .collect();
 
         // Reset typing state
         self.last_typing_sent = None;
@@ -646,6 +745,7 @@ impl ChatView {
 
         // Check if we're editing or replying
         if let Some(edit_msg) = self.editing_message.take() {
+            // Can't add attachments when editing
             runtime.spawn(async move {
                 network.stop_typing(channel_id).await;
                 if let Err(e) = network.update_message(edit_msg.id, &content).await {
@@ -656,8 +756,161 @@ impl ChatView {
             let reply_to_id = self.replying_to.take().map(|m| m.id);
             runtime.spawn(async move {
                 network.stop_typing(channel_id).await;
-                let _ = network.send_message_with_reply(channel_id, &content, reply_to_id).await;
+
+                // Upload attachments first if any, collect their IDs
+                let mut attachment_ids = Vec::new();
+                if !attachments.is_empty() {
+                    match network.upload_files(channel_id, attachments).await {
+                        Ok(uploaded) => {
+                            tracing::info!("Uploaded {} attachments", uploaded.len());
+                            attachment_ids = uploaded.iter().map(|a| a.id).collect();
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to upload attachments: {}", e);
+                        }
+                    }
+                }
+
+                // Send the message with attachments (or just attachments if no text)
+                let has_content = !content.trim().is_empty();
+                let has_attachments = !attachment_ids.is_empty();
+
+                if has_content || has_attachments {
+                    // Use empty content if only attachments
+                    let msg_content = if has_content { &content } else { "" };
+                    let _ = network.send_message_with_attachments(
+                        channel_id,
+                        msg_content,
+                        reply_to_id,
+                        attachment_ids,
+                    ).await;
+                }
             });
+        }
+    }
+
+    /// Open a file picker dialog to select files to attach
+    fn open_file_picker(&mut self) {
+        // Use rfd for file dialog
+        if let Some(paths) = rfd::FileDialog::new()
+            .set_title("Select files to attach")
+            .pick_files()
+        {
+            for path in paths {
+                self.add_file_from_path(&path);
+            }
+        }
+    }
+
+    /// Handle dropped files (drag-and-drop)
+    fn handle_dropped_files(&mut self, ui: &mut egui::Ui) {
+        // Check for dropped files
+        let dropped_files = ui.ctx().input(|i| i.raw.dropped_files.clone());
+
+        for file in dropped_files {
+            if let Some(path) = &file.path {
+                self.add_file_from_path(path);
+            } else if let Some(bytes) = &file.bytes {
+                // File dropped from certain sources may only have bytes, not path
+                let filename = file.name.clone();
+                let data = bytes.to_vec();
+
+                // Check size limit (25MB)
+                const MAX_SIZE: usize = 25 * 1024 * 1024;
+                if data.len() > MAX_SIZE {
+                    tracing::warn!("File {} is too large (max 25MB)", filename);
+                    continue;
+                }
+
+                // Determine content type from filename extension
+                let content_type = std::path::Path::new(&filename)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| Self::content_type_from_extension(ext))
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+
+                self.pending_attachments.push(PendingAttachment {
+                    filename,
+                    content_type,
+                    data,
+                });
+            }
+        }
+
+        // Visual feedback for drag-over
+        let is_being_dragged = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        if is_being_dragged {
+            // Show overlay
+            let screen_rect = ui.ctx().screen_rect();
+            ui.painter().rect_filled(
+                screen_rect,
+                egui::Rounding::ZERO,
+                egui::Color32::from_rgba_unmultiplied(88, 101, 242, 100), // Semi-transparent blue
+            );
+            ui.painter().text(
+                screen_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop files to attach",
+                egui::FontId::proportional(24.0),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+
+    /// Add a file from a path
+    fn add_file_from_path(&mut self, path: &std::path::Path) {
+        if let Some(filename) = path.file_name() {
+            let filename = filename.to_string_lossy().to_string();
+
+            // Read file
+            match std::fs::read(path) {
+                Ok(data) => {
+                    // Check size limit (25MB)
+                    const MAX_SIZE: usize = 25 * 1024 * 1024;
+                    if data.len() > MAX_SIZE {
+                        tracing::warn!("File {} is too large (max 25MB)", filename);
+                        return;
+                    }
+
+                    // Determine content type from extension
+                    let content_type = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|ext| Self::content_type_from_extension(ext))
+                        .unwrap_or("application/octet-stream")
+                        .to_string();
+
+                    self.pending_attachments.push(PendingAttachment {
+                        filename,
+                        content_type,
+                        data,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read file {}: {}", filename, e);
+                }
+            }
+        }
+    }
+
+    /// Get content type from file extension
+    fn content_type_from_extension(ext: &str) -> &'static str {
+        match ext.to_lowercase().as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "pdf" => "application/pdf",
+            "doc" => "application/msword",
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "txt" => "text/plain",
+            "mp3" => "audio/mpeg",
+            "mp4" => "video/mp4",
+            "mov" => "video/quicktime",
+            "zip" => "application/zip",
+            _ => "application/octet-stream",
         }
     }
 

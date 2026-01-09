@@ -63,7 +63,10 @@ config = { workspace = true }
 regex = "1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+
+# File dialogs
+rfd = "0.15"
 
 # Futures
 futures = "0.3"

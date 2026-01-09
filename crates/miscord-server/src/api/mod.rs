@@ -1,3 +1,4 @@
+mod attachments;
 mod auth;
 mod channels;
 mod communities;
@@ -87,6 +88,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/channels/{id}/unread", get(channels::get_unread_count))
         // OpenGraph metadata endpoint
         .route("/api/opengraph", get(opengraph::fetch_opengraph))
+        // File attachment routes
+        .route("/api/channels/{id}/upload", post(attachments::upload_files))
+        .route("/api/files/{id}", get(attachments::download_file))
+        .route(
+            "/api/attachments/{id}",
+            get(attachments::get_attachment).delete(attachments::delete_attachment),
+        )
         // WebSocket endpoint
         .route("/ws", get(ws::handler::ws_handler))
         .layer(TraceLayer::new_for_http())
