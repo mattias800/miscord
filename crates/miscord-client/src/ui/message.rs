@@ -76,6 +76,17 @@ impl Default for MessageRenderOptions {
     }
 }
 
+/// Download progress state
+#[derive(Clone)]
+pub enum DownloadProgress {
+    /// Download in progress with percentage (0-100)
+    Downloading(u8),
+    /// Download completed
+    Completed,
+    /// Download failed
+    Failed(String),
+}
+
 /// Shared state for emoji picker across messages
 pub struct MessageRendererState {
     /// Message ID for which emoji picker is open
@@ -84,6 +95,8 @@ pub struct MessageRendererState {
     pub link_preview_textures: std::collections::HashMap<String, egui::TextureHandle>,
     /// Texture cache for attachment images (url -> texture handle)
     pub attachment_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Download progress for attachments (attachment_id -> progress)
+    pub download_progress: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, DownloadProgress>>>,
 }
 
 impl MessageRendererState {
@@ -92,6 +105,7 @@ impl MessageRendererState {
             emoji_picker_open_for: None,
             link_preview_textures: std::collections::HashMap::new(),
             attachment_textures: std::collections::HashMap::new(),
+            download_progress: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -724,7 +738,7 @@ fn render_attachment(
     if is_image {
         render_image_attachment(ui, attachment, state, network, runtime, renderer_state);
     } else {
-        render_file_attachment(ui, attachment, network, runtime);
+        render_file_attachment(ui, attachment, network, runtime, renderer_state);
     }
 }
 
@@ -849,6 +863,7 @@ fn render_file_attachment(
     attachment: &miscord_protocol::AttachmentData,
     network: &NetworkClient,
     runtime: &tokio::runtime::Runtime,
+    renderer_state: &MessageRendererState,
 ) {
     ui.add_space(4.0);
 
@@ -873,6 +888,15 @@ fn render_file_attachment(
         _ => "📎",
     };
 
+    // Check current download progress for this attachment
+    let current_progress = renderer_state
+        .download_progress
+        .read()
+        .ok()
+        .and_then(|map| map.get(&attachment.id).cloned());
+
+    let is_downloading = matches!(current_progress, Some(DownloadProgress::Downloading(_)));
+
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(38, 40, 46))
         .rounding(egui::Rounding::same(8.0))
@@ -888,60 +912,161 @@ fn render_file_attachment(
                 ui.add_space(8.0);
 
                 ui.vertical(|ui| {
-                    // Filename (clickable)
+                    // Filename (clickable, but disabled during download)
                     let filename_label = ui.add(
                         egui::Label::new(
                             egui::RichText::new(&attachment.filename)
                                 .size(14.0)
-                                .color(egui::Color32::from_rgb(96, 165, 250))
+                                .color(if is_downloading {
+                                    egui::Color32::from_rgb(140, 140, 140)
+                                } else {
+                                    egui::Color32::from_rgb(96, 165, 250)
+                                })
                         )
-                        .sense(egui::Sense::click())
+                        .sense(if is_downloading {
+                            egui::Sense::hover()
+                        } else {
+                            egui::Sense::click()
+                        })
                     );
 
-                    if filename_label.hovered() {
+                    if !is_downloading && filename_label.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
 
-                    if filename_label.clicked() {
-                        // Trigger download
+                    if !is_downloading && filename_label.clicked() {
+                        // Trigger download with progress tracking
                         let network = network.clone();
                         let url = attachment.url.clone();
                         let filename = attachment.filename.clone();
+                        let attachment_id = attachment.id;
+                        let total_size = attachment.size_bytes;
+                        let progress_map = renderer_state.download_progress.clone();
+
+                        // Set initial progress
+                        if let Ok(mut map) = progress_map.write() {
+                            map.insert(attachment_id, DownloadProgress::Downloading(0));
+                        }
+
                         runtime.spawn(async move {
-                            if let Err(e) = download_attachment(&network, &url, &filename).await {
-                                tracing::warn!("Failed to download attachment: {}", e);
+                            match download_attachment_with_progress(
+                                &network,
+                                &url,
+                                &filename,
+                                total_size,
+                                attachment_id,
+                                progress_map.clone(),
+                            ).await {
+                                Ok(()) => {
+                                    if let Ok(mut map) = progress_map.write() {
+                                        map.insert(attachment_id, DownloadProgress::Completed);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to download attachment: {}", e);
+                                    if let Ok(mut map) = progress_map.write() {
+                                        map.insert(attachment_id, DownloadProgress::Failed(e.to_string()));
+                                    }
+                                }
                             }
                         });
                     }
 
-                    // File size
-                    ui.label(
-                        egui::RichText::new(format_file_size(attachment.size_bytes))
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(140, 140, 140))
-                    );
+                    // File size and progress info
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format_file_size(attachment.size_bytes))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140))
+                        );
+
+                        // Show download progress if applicable
+                        match &current_progress {
+                            Some(DownloadProgress::Downloading(percent)) => {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new(format!("Downloading... {}%", percent))
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(96, 165, 250))
+                                );
+                            }
+                            Some(DownloadProgress::Completed) => {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("Downloaded")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(80, 200, 120))
+                                );
+                            }
+                            Some(DownloadProgress::Failed(_)) => {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("Failed")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(240, 80, 80))
+                                );
+                            }
+                            None => {}
+                        }
+                    });
                 });
             });
         });
+
+    // Request repaint while downloading to update progress
+    if is_downloading {
+        ui.ctx().request_repaint();
+    }
 }
 
-/// Download an attachment and save to the user's downloads folder
-async fn download_attachment(
+/// Download an attachment with progress tracking and save to the user's downloads folder
+async fn download_attachment_with_progress(
     network: &NetworkClient,
     attachment_url: &str,
     filename: &str,
+    total_size: i64,
+    attachment_id: Uuid,
+    progress_map: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, DownloadProgress>>>,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
+    use futures_util::StreamExt;
 
     let server_url = network.get_base_url().await;
     let full_url = format!("{}{}", server_url, attachment_url);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
     let response = client.get(&full_url).send().await?;
-    let bytes = response.bytes().await?;
+
+    // Get content length from response if available, otherwise use total_size
+    let content_length = response
+        .content_length()
+        .unwrap_or(total_size as u64);
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut all_bytes = Vec::with_capacity(content_length as usize);
+
+    // Stream the download and update progress
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        downloaded += chunk.len() as u64;
+        all_bytes.extend_from_slice(&chunk);
+
+        // Calculate percentage
+        let percent = if content_length > 0 {
+            ((downloaded as f64 / content_length as f64) * 100.0).min(100.0) as u8
+        } else {
+            0
+        };
+
+        // Update progress map
+        if let Ok(mut map) = progress_map.write() {
+            map.insert(attachment_id, DownloadProgress::Downloading(percent));
+        }
+    }
 
     // Get downloads directory
     let downloads_dir = dirs::download_dir()
@@ -950,7 +1075,7 @@ async fn download_attachment(
     let file_path = downloads_dir.join(filename);
 
     // Write file
-    std::fs::write(&file_path, &bytes)
+    std::fs::write(&file_path, &all_bytes)
         .with_context(|| format!("Failed to write file to {:?}", file_path))?;
 
     tracing::info!("Downloaded attachment to {:?}", file_path);
