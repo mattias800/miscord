@@ -5,7 +5,12 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Cached image data (RGBA bytes, width, height) wrapped in Arc to avoid cloning
+pub type CachedImageData = Arc<(Vec<u8>, u32, u32)>;
+
 use miscord_protocol::{ChannelData, CommunityData, MessageData, UserData};
+
+use crate::network::OpenGraphData;
 
 /// Tracks reaction state for a single emoji on a message.
 /// Contains the set of user IDs who reacted with this emoji.
@@ -106,6 +111,18 @@ pub struct AppStateInner {
     // Thread state
     pub open_thread: Option<Uuid>, // Parent message ID of currently open thread
     pub thread_messages: HashMap<Uuid, Vec<MessageData>>, // parent_message_id -> thread replies
+
+    // Link preview cache (url -> OpenGraph data)
+    pub opengraph_cache: HashMap<String, OpenGraphData>,
+    // URLs currently being fetched (to avoid duplicate requests)
+    pub opengraph_pending: HashSet<String>,
+
+    // Image cache for link previews (url -> decoded RGBA bytes, width, height)
+    pub image_cache: HashMap<String, CachedImageData>,
+    // Image URLs currently being fetched
+    pub image_pending: HashSet<String>,
+    // Image URLs that failed to fetch (to prevent retries)
+    pub image_failed: HashSet<String>,
 }
 
 impl Default for AppStateInner {
@@ -152,6 +169,11 @@ impl Default for AppStateInner {
             pending_keyframe_requests: Vec::new(),
             open_thread: None,
             thread_messages: HashMap::new(),
+            opengraph_cache: HashMap::new(),
+            opengraph_pending: HashSet::new(),
+            image_cache: HashMap::new(),
+            image_pending: HashSet::new(),
+            image_failed: HashSet::new(),
         }
     }
 }
@@ -644,6 +666,107 @@ impl AppState {
     pub async fn clear_thread_messages(&self, parent_message_id: Uuid) {
         let mut state = self.inner.write().await;
         state.thread_messages.remove(&parent_message_id);
+    }
+
+    /// Get cached OpenGraph data for a URL
+    pub async fn get_opengraph(&self, url: &str) -> Option<OpenGraphData> {
+        self.inner.read().await.opengraph_cache.get(url).cloned()
+    }
+
+    /// Get cached OpenGraph data synchronously (non-blocking, returns None if lock contended)
+    pub fn get_opengraph_sync(&self, url: &str) -> Option<OpenGraphData> {
+        self.inner.try_read().ok()?.opengraph_cache.get(url).cloned()
+    }
+
+    /// Cache OpenGraph data for a URL and mark it as no longer pending
+    pub async fn set_opengraph(&self, url: String, data: OpenGraphData) {
+        let mut state = self.inner.write().await;
+        state.opengraph_pending.remove(&url);
+        state.opengraph_cache.insert(url, data);
+    }
+
+    /// Check if a URL fetch is already pending
+    pub async fn is_opengraph_pending(&self, url: &str) -> bool {
+        self.inner.read().await.opengraph_pending.contains(url)
+    }
+
+    /// Mark a URL as pending fetch (returns false if already pending or cached)
+    pub async fn mark_opengraph_pending(&self, url: &str) -> bool {
+        let mut state = self.inner.write().await;
+        if state.opengraph_cache.contains_key(url) || state.opengraph_pending.contains(url) {
+            return false;
+        }
+        state.opengraph_pending.insert(url.to_string());
+        true
+    }
+
+    /// Mark a URL as pending fetch synchronously (non-blocking)
+    pub fn mark_opengraph_pending_sync(&self, url: &str) -> Option<bool> {
+        let mut state = self.inner.try_write().ok()?;
+        if state.opengraph_cache.contains_key(url) || state.opengraph_pending.contains(url) {
+            return Some(false);
+        }
+        state.opengraph_pending.insert(url.to_string());
+        Some(true)
+    }
+
+    /// Mark a URL fetch as failed (remove from pending)
+    pub async fn mark_opengraph_failed(&self, url: &str) {
+        let mut state = self.inner.write().await;
+        state.opengraph_pending.remove(url);
+        // Insert empty data to prevent re-fetching
+        state.opengraph_cache.insert(url.to_string(), OpenGraphData {
+            url: url.to_string(),
+            title: None,
+            description: None,
+            image: None,
+            site_name: None,
+        });
+    }
+
+    /// Get cached image data for a URL (RGBA bytes, width, height)
+    pub async fn get_image(&self, url: &str) -> Option<CachedImageData> {
+        self.inner.read().await.image_cache.get(url).cloned()
+    }
+
+    /// Get cached image data synchronously (non-blocking) - cheap Arc clone
+    pub fn get_image_sync(&self, url: &str) -> Option<CachedImageData> {
+        self.inner.try_read().ok()?.image_cache.get(url).cloned()
+    }
+
+    /// Cache image data for a URL
+    pub async fn set_image(&self, url: String, data: Vec<u8>, width: u32, height: u32) {
+        let mut state = self.inner.write().await;
+        state.image_pending.remove(&url);
+        state.image_cache.insert(url, Arc::new((data, width, height)));
+    }
+
+    /// Mark an image URL as pending fetch (returns false if already pending, cached, or failed)
+    pub async fn mark_image_pending(&self, url: &str) -> bool {
+        let mut state = self.inner.write().await;
+        if state.image_cache.contains_key(url) || state.image_pending.contains(url) || state.image_failed.contains(url) {
+            return false;
+        }
+        state.image_pending.insert(url.to_string());
+        true
+    }
+
+    /// Mark an image URL as pending fetch synchronously (non-blocking)
+    /// Returns Some(false) if already pending, cached, or failed
+    pub fn mark_image_pending_sync(&self, url: &str) -> Option<bool> {
+        let mut state = self.inner.try_write().ok()?;
+        if state.image_cache.contains_key(url) || state.image_pending.contains(url) || state.image_failed.contains(url) {
+            return Some(false);
+        }
+        state.image_pending.insert(url.to_string());
+        Some(true)
+    }
+
+    /// Mark an image fetch as failed (prevents retries)
+    pub async fn mark_image_failed(&self, url: &str) {
+        let mut state = self.inner.write().await;
+        state.image_pending.remove(url);
+        state.image_failed.insert(url.to_string());
     }
 }
 

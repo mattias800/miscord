@@ -4,7 +4,7 @@ use chrono::{DateTime, Local, Utc};
 use eframe::egui;
 use uuid::Uuid;
 
-use crate::network::NetworkClient;
+use crate::network::{NetworkClient, OpenGraphData};
 use crate::state::AppState;
 use miscord_protocol::MessageData;
 
@@ -80,12 +80,15 @@ impl Default for MessageRenderOptions {
 pub struct MessageRendererState {
     /// Message ID for which emoji picker is open
     pub emoji_picker_open_for: Option<Uuid>,
+    /// Texture cache for link preview images (url -> texture handle)
+    pub link_preview_textures: std::collections::HashMap<String, egui::TextureHandle>,
 }
 
 impl MessageRendererState {
     pub fn new() -> Self {
         Self {
             emoji_picker_open_for: None,
+            link_preview_textures: std::collections::HashMap::new(),
         }
     }
 }
@@ -276,6 +279,44 @@ pub fn render_message(
         super::markdown::render_markdown(ui, &message.content);
     });
 
+    // Link previews - extract URLs and show preview cards (limit to first URL only)
+    let urls = super::markdown::extract_urls(&message.content);
+    if !urls.is_empty() {
+        // Get cached OpenGraph data for URLs (non-blocking)
+        for url in &urls {
+            // Check cache first (sync, non-blocking)
+            let cached = state.get_opengraph_sync(url);
+
+            if cached.is_none() {
+                // Not cached - trigger fetch if not already pending (sync, non-blocking)
+                if state.mark_opengraph_pending_sync(url) == Some(true) {
+                    let network = network.clone();
+                    let state = state.clone();
+                    let url = url.clone();
+                    runtime.spawn(async move {
+                        match network.fetch_opengraph(&url).await {
+                            Ok(data) => {
+                                state.set_opengraph(url, data).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to fetch OpenGraph for {}: {}", url, e);
+                                state.mark_opengraph_failed(&url).await;
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Render preview card if we have cached data
+            if let Some(og_data) = cached {
+                // Only show preview if we have at least a title or description
+                if og_data.title.is_some() || og_data.description.is_some() {
+                    render_link_preview(ui, &og_data, state, network, runtime, renderer_state);
+                }
+            }
+        }
+    }
+
     // Display existing reactions (clickable to toggle)
     // Use provided reactions parameter if available, otherwise fall back to message.reactions
     let has_reactions = reactions.map(|r| !r.is_empty()).unwrap_or(!message.reactions.is_empty());
@@ -419,4 +460,161 @@ pub fn render_message(
     }
 
     action
+}
+
+/// Render a link preview card with optional image
+fn render_link_preview(
+    ui: &mut egui::Ui,
+    data: &OpenGraphData,
+    state: &AppState,
+    network: &NetworkClient,
+    runtime: &tokio::runtime::Runtime,
+    renderer_state: &mut MessageRendererState,
+) {
+    ui.add_space(4.0);
+
+    // Try to load image with actual network fetch
+    let image_data = if let Some(image_url) = &data.image {
+        let cached = state.get_image_sync(image_url);
+
+        if cached.is_none() {
+            if state.mark_image_pending_sync(image_url) == Some(true) {
+                let network = network.clone();
+                let state = state.clone();
+                let url = image_url.clone();
+                runtime.spawn(async move {
+                    match network.fetch_image(&url).await {
+                        Ok((bytes, width, height)) => {
+                            state.set_image(url, bytes, width, height).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch image {}: {}", url, e);
+                            state.mark_image_failed(&url).await;
+                        }
+                    }
+                });
+            }
+        }
+
+        cached
+    } else {
+        None
+    };
+
+    // Preview card with left accent bar (like Discord/Slack)
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(38, 40, 46))  // BG_ELEVATED
+        .rounding(egui::Rounding::same(4.0))
+        .inner_margin(egui::Margin::same(0.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Left accent bar
+                let content_height = if image_data.is_some() { 120.0 } else { 60.0 };
+                let accent_rect = ui.allocate_exact_size(
+                    egui::vec2(4.0, content_height),
+                    egui::Sense::hover()
+                ).0;
+                ui.painter().rect_filled(
+                    accent_rect,
+                    egui::Rounding {
+                        nw: 4.0,
+                        sw: 4.0,
+                        ne: 0.0,
+                        se: 0.0,
+                    },
+                    egui::Color32::from_rgb(88, 101, 242),  // Discord blurple
+                );
+
+                // Content area
+                ui.vertical(|ui| {
+                    ui.add_space(8.0);
+                    ui.set_min_width(300.0);
+                    ui.set_max_width(400.0);
+
+                    // Site name (if available)
+                    if let Some(site_name) = &data.site_name {
+                        ui.label(
+                            egui::RichText::new(site_name)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140))
+                        );
+                    }
+
+                    // Title (clickable link)
+                    if let Some(title) = &data.title {
+                        let title_label = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(title)
+                                    .size(14.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(0, 168, 252))  // Link blue
+                            )
+                            .sense(egui::Sense::click())
+                        );
+
+                        if title_label.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+
+                        if title_label.clicked() {
+                            if let Err(e) = open::that(&data.url) {
+                                tracing::warn!("Failed to open URL: {}", e);
+                            }
+                        }
+
+                        title_label.on_hover_text(&data.url);
+                    }
+
+                    // Description (truncated)
+                    if let Some(description) = &data.description {
+                        let truncated: String = description.chars().take(150).collect();
+                        let display_text = if description.len() > 150 {
+                            format!("{}...", truncated)
+                        } else {
+                            truncated
+                        };
+
+                        ui.label(
+                            egui::RichText::new(display_text)
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(180, 180, 180))
+                        );
+                    }
+
+                    // Image (if available and loaded)
+                    if let Some(cached_img) = &image_data {
+                        let image_url = data.image.as_ref().unwrap();
+                        let (rgba_data, width, height) = cached_img.as_ref();
+                        ui.add_space(8.0);
+
+                        // Get or create texture from renderer state cache
+                        if !renderer_state.link_preview_textures.contains_key(image_url) {
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [*width as usize, *height as usize],
+                                rgba_data,
+                            );
+                            let handle = ui.ctx().load_texture(
+                                format!("link_preview_{}", image_url),
+                                color_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            renderer_state.link_preview_textures.insert(image_url.clone(), handle);
+                        }
+
+                        if let Some(texture) = renderer_state.link_preview_textures.get(image_url) {
+                            // Calculate display size (max 300px wide, maintain aspect ratio)
+                            let aspect = *width as f32 / *height as f32;
+                            let display_width = (*width as f32).min(300.0);
+                            let display_height = display_width / aspect;
+
+                            ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(display_width, display_height)));
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                });
+
+                ui.add_space(12.0);
+            });
+        });
 }

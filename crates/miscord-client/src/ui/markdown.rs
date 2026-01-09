@@ -63,6 +63,13 @@ static RE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
 static RE_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d+\.?\d*\b").unwrap());
 
+/// Extract all URLs from text
+pub fn extract_urls(text: &str) -> Vec<String> {
+    RE_URL.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
 /// Render markdown text in the UI
 pub fn render_markdown(ui: &mut Ui, text: &str) {
     // First, split by code blocks

@@ -26,6 +26,7 @@ tokio = { workspace = true }
 # GUI
 eframe = { workspace = true }
 egui = { workspace = true }
+image = { workspace = true }
 
 # WebSocket
 tokio-tungstenite = { workspace = true }

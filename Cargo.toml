@@ -60,6 +60,7 @@ nokhwa = { version = "0.10", features = ["input-native"] }
 # GUI (client only)
 eframe = "0.30"
 egui = "0.30"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 # Audio
 cpal = "0.15"

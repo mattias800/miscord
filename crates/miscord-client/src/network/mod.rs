@@ -552,6 +552,33 @@ impl NetworkClient {
         )
         .await
     }
+
+    /// Fetch and decode an image from a URL
+    /// Returns (RGBA bytes, width, height)
+    pub async fn fetch_image(&self, url: &str) -> Result<(Vec<u8>, u32, u32)> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+
+        let response = client.get(url).send().await?;
+        let bytes = response.bytes().await?;
+
+        // Decode the image
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to decode image: {}", e))?;
+
+        // Resize if too large (max 400px width for previews)
+        let img = if img.width() > 400 {
+            img.resize(400, 400, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+
+        let rgba = img.to_rgba8();
+        let (width, height) = rgba.dimensions();
+
+        Ok((rgba.into_raw(), width, height))
+    }
 }
 
 /// ICE server configuration for WebRTC

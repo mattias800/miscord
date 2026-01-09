@@ -21,45 +21,22 @@ pub struct FetchOpenGraphQuery {
     pub url: String,
 }
 
-// Regex patterns for OpenGraph meta tags
-static RE_OG_TITLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+(?:property|name)=["']og:title["']\s+content=["']([^"']+)["']"#).unwrap()
+// Regex pattern to find meta tags (captures the entire tag content)
+static RE_META_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<meta\s+([^>]+?)/?>"#).unwrap()
 });
-static RE_OG_TITLE_ALT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:title["']"#).unwrap()
+
+// Patterns to extract property/name and content from meta tag attributes
+static RE_PROPERTY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:property|name)\s*=\s*["']([^"']+)["']"#).unwrap()
 });
-static RE_OG_DESC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+(?:property|name)=["']og:description["']\s+content=["']([^"']+)["']"#)
-        .unwrap()
-});
-static RE_OG_DESC_ALT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:description["']"#)
-        .unwrap()
-});
-static RE_OG_IMAGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+(?:property|name)=["']og:image["']\s+content=["']([^"']+)["']"#).unwrap()
-});
-static RE_OG_IMAGE_ALT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:image["']"#).unwrap()
-});
-static RE_OG_SITE_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+(?:property|name)=["']og:site_name["']\s+content=["']([^"']+)["']"#)
-        .unwrap()
-});
-static RE_OG_SITE_NAME_ALT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:site_name["']"#)
-        .unwrap()
+static RE_CONTENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)content\s*=\s*["']([^"']+)["']"#).unwrap()
 });
 
 // Fallback patterns for regular HTML meta tags
 static RE_TITLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"<title[^>]*>([^<]+)</title>"#).unwrap());
-static RE_META_DESC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+name=["']description["']\s+content=["']([^"']+)["']"#).unwrap()
-});
-static RE_META_DESC_ALT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<meta\s+content=["']([^"']+)["']\s+name=["']description["']"#).unwrap()
-});
+    LazyLock::new(|| Regex::new(r#"(?is)<title[^>]*>([^<]+)</title>"#).unwrap());
 
 /// Fetch OpenGraph metadata for a URL
 pub async fn fetch_opengraph(
@@ -119,27 +96,50 @@ pub async fn fetch_opengraph(
         &body
     };
 
-    // Extract OpenGraph metadata
-    let title = extract_match(&RE_OG_TITLE, body)
-        .or_else(|| extract_match(&RE_OG_TITLE_ALT, body))
-        .or_else(|| extract_match(&RE_TITLE, body));
+    // Extract OpenGraph metadata by parsing all meta tags
+    let mut og_title = None;
+    let mut og_description = None;
+    let mut og_image = None;
+    let mut og_site_name = None;
+    let mut meta_description = None;
 
-    let description = extract_match(&RE_OG_DESC, body)
-        .or_else(|| extract_match(&RE_OG_DESC_ALT, body))
-        .or_else(|| extract_match(&RE_META_DESC, body))
-        .or_else(|| extract_match(&RE_META_DESC_ALT, body));
+    for meta_cap in RE_META_TAG.captures_iter(body) {
+        let attrs = &meta_cap[1];
 
-    let image = extract_match(&RE_OG_IMAGE, body).or_else(|| extract_match(&RE_OG_IMAGE_ALT, body));
+        // Extract property/name and content from this meta tag
+        let property = RE_PROPERTY
+            .captures(attrs)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_lowercase());
+        let content = RE_CONTENT
+            .captures(attrs)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string());
 
-    let site_name = extract_match(&RE_OG_SITE_NAME, body)
-        .or_else(|| extract_match(&RE_OG_SITE_NAME_ALT, body));
+        if let (Some(prop), Some(cont)) = (property, content) {
+            match prop.as_str() {
+                "og:title" => og_title = og_title.or(Some(cont)),
+                "og:description" => og_description = og_description.or(Some(cont)),
+                "og:image" => og_image = og_image.or(Some(cont)),
+                "og:site_name" => og_site_name = og_site_name.or(Some(cont)),
+                "description" => meta_description = meta_description.or(Some(cont)),
+                _ => {}
+            }
+        }
+    }
+
+    // Fallback to <title> tag if no og:title
+    let title = og_title.or_else(|| extract_match(&RE_TITLE, body));
+
+    // Fallback to meta description if no og:description
+    let description = og_description.or(meta_description);
 
     Ok(Json(OpenGraphData {
         url: url.clone(),
         title: title.map(decode_html_entities),
         description: description.map(decode_html_entities),
-        image,
-        site_name: site_name.map(decode_html_entities),
+        image: og_image.map(decode_html_entities),
+        site_name: og_site_name.map(decode_html_entities),
     }))
 }
 

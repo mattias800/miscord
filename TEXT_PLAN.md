@@ -71,12 +71,11 @@ These features significantly improve the core messaging experience:
 - [ ] Visual connection line between reply and original
 
 #### 2.4 Link Previews ✅
-- [ ] Parse URLs in message content
-- [ ] Make URLs clickable (opens in browser)
-- [ ] Style URLs with blue color and underline
-- [ ] Fetch OpenGraph metadata (title, description, image)
-- [ ] Display preview card below message
-- [ ] Server-side proxy to avoid CORS issues
+- [x] Parse URLs in message content
+- [x] Make URLs clickable (opens in browser)
+- [x] Style URLs with blue color and underline
+- [x] Server-side proxy to avoid CORS issues (OpenGraph endpoint)
+- [x] Fetch OpenGraph metadata and display preview card below message
 - [ ] Support YouTube embeds (via oEmbed API)
 
 #### 2.5 User Mentions (@username) ✅
@@ -224,7 +223,7 @@ Another agent is currently working on server, community, and user account manage
   - [x] Typing indicators (shows "User is typing..." via WebSocket events)
   - [x] Unread indicators for text channels (badge with count, bright text, mark-as-read on select)
   - [x] Message replies/threading - Slack-style threads with side panel, real-time updates
-  - [x] Link previews - OpenGraph endpoint, clickable URLs in messages
+  - [x] Link previews - OpenGraph fetch, preview cards with title/description/site name
   - [x] User mentions (@username) - autocomplete dropdown, keyboard navigation, highlight in messages
   - [x] Smart auto-scroll - Uses egui's stick_to_bottom
 
