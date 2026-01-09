@@ -540,6 +540,15 @@ fn render_link_preview(
                         );
                     }
 
+                    // Author/channel name for videos
+                    if let Some(author) = &data.author_name {
+                        ui.label(
+                            egui::RichText::new(author)
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(160, 160, 160))
+                        );
+                    }
+
                     // Title (clickable link)
                     if let Some(title) = &data.title {
                         let title_label = ui.add(
@@ -607,7 +616,61 @@ fn render_link_preview(
                             let display_width = (*width as f32).min(300.0);
                             let display_height = display_width / aspect;
 
-                            ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(display_width, display_height)));
+                            let is_video = data.video_type.is_some();
+
+                            // For videos, make the thumbnail clickable with a play button overlay
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(display_width, display_height),
+                                egui::Sense::click(),
+                            );
+
+                            if ui.is_rect_visible(rect) {
+                                // Draw the thumbnail
+                                ui.painter().image(
+                                    texture.id(),
+                                    rect,
+                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                    egui::Color32::WHITE,
+                                );
+
+                                // Draw play button overlay for videos
+                                if is_video {
+                                    let center = rect.center();
+                                    let play_radius = 24.0;
+
+                                    // Semi-transparent dark circle
+                                    ui.painter().circle_filled(
+                                        center,
+                                        play_radius,
+                                        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                                    );
+
+                                    // Play triangle
+                                    let triangle_size = 12.0;
+                                    let triangle = vec![
+                                        egui::pos2(center.x - triangle_size * 0.4, center.y - triangle_size),
+                                        egui::pos2(center.x - triangle_size * 0.4, center.y + triangle_size),
+                                        egui::pos2(center.x + triangle_size * 0.8, center.y),
+                                    ];
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        triangle,
+                                        egui::Color32::WHITE,
+                                        egui::Stroke::NONE,
+                                    ));
+                                }
+                            }
+
+                            if response.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+
+                            if response.clicked() {
+                                if let Err(e) = open::that(&data.url) {
+                                    tracing::warn!("Failed to open URL: {}", e);
+                                }
+                            }
+
+                            response.on_hover_text(if is_video { "Click to watch video" } else { &data.url });
                         }
                     }
 

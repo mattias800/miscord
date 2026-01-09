@@ -597,4 +597,8 @@ pub struct OpenGraphData {
     pub description: Option<String>,
     pub image: Option<String>,
     pub site_name: Option<String>,
+    /// For video embeds: "youtube", "vimeo", etc.
+    pub video_type: Option<String>,
+    /// Channel/author name for videos
+    pub author_name: Option<String>,
 }

@@ -721,6 +721,8 @@ impl AppState {
             description: None,
             image: None,
             site_name: None,
+            video_type: None,
+            author_name: None,
         });
     }
 

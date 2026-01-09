@@ -14,6 +14,12 @@ pub struct OpenGraphData {
     pub description: Option<String>,
     pub image: Option<String>,
     pub site_name: Option<String>,
+    /// For video embeds: "youtube", "vimeo", etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_type: Option<String>,
+    /// Channel/author name for videos
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +44,11 @@ static RE_CONTENT: LazyLock<Regex> = LazyLock::new(|| {
 static RE_TITLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?is)<title[^>]*>([^<]+)</title>"#).unwrap());
 
+// YouTube URL patterns
+static RE_YOUTUBE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/shorts/)([a-zA-Z0-9_-]+)"#).unwrap()
+});
+
 /// Fetch OpenGraph metadata for a URL
 pub async fn fetch_opengraph(
     _auth: AuthUser,
@@ -48,6 +59,11 @@ pub async fn fetch_opengraph(
     // Basic URL validation
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(AppError::BadRequest("Invalid URL".to_string()));
+    }
+
+    // Check if this is a YouTube URL - use oEmbed API for better metadata
+    if let Some(video_id) = extract_youtube_id(url) {
+        return fetch_youtube_oembed(url, &video_id).await;
     }
 
     // Fetch the page with timeout
@@ -143,6 +159,8 @@ pub async fn fetch_opengraph(
         description: description.map(decode_html_entities),
         image: og_image.map(decode_html_entities),
         site_name: site_name.map(decode_html_entities),
+        video_type: None,
+        author_name: None,
     }))
 }
 
@@ -170,4 +188,75 @@ fn extract_domain(url: &str) -> Option<String> {
     } else {
         Some(domain.to_string())
     }
+}
+
+/// Extract YouTube video ID from various URL formats
+fn extract_youtube_id(url: &str) -> Option<String> {
+    RE_YOUTUBE
+        .captures(url)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// YouTube oEmbed response
+#[derive(Debug, Deserialize)]
+struct YouTubeOEmbed {
+    title: Option<String>,
+    author_name: Option<String>,
+    thumbnail_url: Option<String>,
+}
+
+/// Fetch YouTube video metadata via oEmbed API
+async fn fetch_youtube_oembed(original_url: &str, video_id: &str) -> Result<Json<OpenGraphData>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("MiscordBot/1.0")
+        .build()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create HTTP client: {}", e)))?;
+
+    // Use canonical YouTube URL for oEmbed
+    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let oembed_url = format!(
+        "https://www.youtube.com/oembed?url={}&format=json",
+        urlencoding::encode(&video_url)
+    );
+
+    let response = client
+        .get(&oembed_url)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to fetch YouTube oEmbed: {}", e)))?;
+
+    if !response.status().is_success() {
+        // Fall back to basic info if oEmbed fails
+        return Ok(Json(OpenGraphData {
+            url: original_url.to_string(),
+            title: None,
+            description: None,
+            image: Some(format!("https://img.youtube.com/vi/{}/hqdefault.jpg", video_id)),
+            site_name: Some("YouTube".to_string()),
+            video_type: Some("youtube".to_string()),
+            author_name: None,
+        }));
+    }
+
+    let oembed: YouTubeOEmbed = response
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to parse YouTube oEmbed: {}", e)))?;
+
+    // Use high-quality thumbnail (maxresdefault if available, fallback to hqdefault)
+    let thumbnail = oembed.thumbnail_url.unwrap_or_else(|| {
+        format!("https://img.youtube.com/vi/{}/hqdefault.jpg", video_id)
+    });
+
+    Ok(Json(OpenGraphData {
+        url: original_url.to_string(),
+        title: oembed.title,
+        description: None, // YouTube oEmbed doesn't include description
+        image: Some(thumbnail),
+        site_name: Some("YouTube".to_string()),
+        video_type: Some("youtube".to_string()),
+        author_name: oembed.author_name,
+    }))
 }
