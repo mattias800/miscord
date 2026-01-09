@@ -1284,6 +1284,17 @@ impl VoiceChannelView {
                         continue;
                     }
 
+                    // LATENCY MEASUREMENT: Log UI display timestamp
+                    static DISPLAY_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let count = DISPLAY_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count % 30 == 0 {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        tracing::info!("[LATENCY] UI_DISPLAY frame={} ts={} user={}", count, ts, user_id);
+                    }
+
                     let image = ColorImage::from_rgba_unmultiplied(
                         [frame.width as usize, frame.height as usize],
                         &frame.data,

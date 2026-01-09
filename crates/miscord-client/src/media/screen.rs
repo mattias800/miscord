@@ -258,6 +258,9 @@ impl ScreenCapture {
         appsink.set_property("max-buffers", 1u32);  // Only keep latest frame
         appsink.set_property("drop", true);
 
+        // Note: Source pipelines need the clock to produce frames
+        // Low latency is achieved via sync=false, drop=true, and leaky queues
+
         // Start the pipeline
         pipeline.set_state(gst::State::Playing)?;
 
@@ -314,15 +317,13 @@ impl ScreenCapture {
         #[cfg(target_os = "macos")]
         {
             // macOS: Use avfvideosrc with capture-screen=true
-            // device-index selects which display to capture
-            // Low-latency optimizations:
-            // - No videorate (source framerate is stable enough)
-            // - Capture in NV12 (native), convert to RGBA for UI preview
-            // - Encoder will convert RGBA→NV12 but this is fast on modern hardware
+            // ULTRA LOW LATENCY configuration:
+            // - queue leaky=downstream: Drop old frames, always use latest
             // - appsink with sync=false, max-buffers=1, drop=true
             Ok(format!(
                 "avfvideosrc capture-screen=true capture-screen-cursor=true device-index={} ! \
                  video/x-raw,format=NV12,framerate={}/1 ! \
+                 queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! \
                  {}videoconvert ! video/x-raw,format=RGBA ! \
                  appsink name=sink sync=false max-buffers=1 drop=true",
                 monitor_id, fps, scale_element
@@ -383,6 +384,17 @@ impl ScreenCapture {
                 // Map buffer to read data
                 let map = buffer.map_readable().ok()?;
                 let data = map.as_slice().to_vec();
+
+                // LATENCY MEASUREMENT: Log capture timestamp
+                static CAPTURE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let count = CAPTURE_COUNT.fetch_add(1, Ordering::SeqCst);
+                if count % 30 == 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    tracing::info!("[LATENCY] CAPTURE frame={} ts={}", count, now);
+                }
 
                 Some(ScreenFrame {
                     width,

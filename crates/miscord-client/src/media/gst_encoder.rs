@@ -110,16 +110,16 @@ fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
             // Low-latency optimizations:
             // - allow-frame-reordering=false disables B-frames (critical for low latency)
             // - realtime=true minimizes internal buffering
-            // - max-keyframe-interval=30 (1 keyframe per second at 30fps)
+            // - max-keyframe-interval=30 (keyframe every 1 second at 30fps)
             // - quality=0.5 trades quality for speed (0.0=fastest, 1.0=best)
             // - max-keyframe-interval-duration=0 ensures keyframes are based on interval not time
-            // h264parse config-interval=1 inserts SPS/PPS frequently for quick decoder start
+            // h264parse config-interval=-1 inserts SPS/PPS with every keyframe
             // stream-format=byte-stream ensures Annex B output for RTP
             format!(
                 "{} name=encoder realtime=true allow-frame-reordering=false \
                  max-keyframe-interval=30 max-keyframe-interval-duration=0 \
                  quality=0.5 bitrate={} ! \
-                 h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au",
+                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 encoder,
                 bitrate / 1000  // vtenc uses kbps
             )
@@ -281,6 +281,9 @@ impl GstH264Encoder {
         appsink.set_property("emit-signals", true);
         appsink.set_property("sync", false);
 
+        // Note: Encoder needs clock for appsrc do-timestamp=true to work
+        // Low latency is achieved via sync=false on appsink and minimal buffering
+
         // Start the pipeline
         pipeline.set_state(gst::State::Playing)?;
 
@@ -381,48 +384,67 @@ impl GstH264Encoder {
 
         self.appsrc.push_buffer(buffer)?;
 
-        // Ultra-low latency: minimal timeout since hardware encoder is fast
-        // With realtime=true and quality=0.5, encoder should produce output in <5ms
-        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(8)) {
-            Some(sample) => {
-                let buffer = sample.buffer().ok_or_else(|| anyhow!("No buffer in sample"))?;
-                let map = buffer.map_readable()?;
-                let data = map.as_slice().to_vec();
+        // ULTRA LOW LATENCY: Drain all available encoded frames and return only the LATEST
+        // This ensures we always send the most recent frame, not a buffered old one
+        static ENCODE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = ENCODE_COUNT.fetch_add(1, Ordering::SeqCst);
 
-                // Log NAL types in the encoded frame for debugging
-                static ENCODE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let count = ENCODE_COUNT.fetch_add(1, Ordering::SeqCst);
-                if count < 10 && !data.is_empty() {
-                    // Find NAL units and log their types
-                    let mut i = 0;
-                    let mut nal_info = Vec::new();
-                    while i < data.len().saturating_sub(4) {
-                        // Look for start codes (00 00 00 01 or 00 00 01)
-                        if data[i] == 0 && data[i+1] == 0 {
-                            let start_code_len = if i + 3 < data.len() && data[i+2] == 0 && data[i+3] == 1 { 4 }
-                                else if data[i+2] == 1 { 3 }
-                                else { 0 };
-                            if start_code_len > 0 {
-                                let nal_start = i + start_code_len;
-                                if nal_start < data.len() {
-                                    let nal_header = data[nal_start];
-                                    let nal_type = nal_header & 0x1f;
-                                    nal_info.push(format!("type={}", nal_type));
-                                }
-                                i = nal_start;
-                                continue;
-                            }
-                        }
-                        i += 1;
+        // LATENCY MEASUREMENT: Log encoder input timestamp
+        let encode_start = std::time::Instant::now();
+        let ts_in = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        if count % 30 == 0 {
+            tracing::info!("[LATENCY] ENCODE_IN frame={} ts={}", count, ts_in);
+        }
+
+        let mut latest_data: Option<Vec<u8>> = None;
+        let mut frames_drained = 0u32;
+
+        // Use zero timeout - grab whatever is ready NOW
+        while let Some(sample) = self.appsink.try_pull_sample(gst::ClockTime::ZERO) {
+            frames_drained += 1;
+            if let Some(buffer) = sample.buffer() {
+                if let Ok(map) = buffer.map_readable() {
+                    latest_data = Some(map.as_slice().to_vec());
+                }
+            }
+        }
+
+        // If nothing ready yet, give it a tiny bit more time for the first few frames
+        if latest_data.is_none() && count < 100 {
+            if let Some(sample) = self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(5)) {
+                if let Some(buffer) = sample.buffer() {
+                    if let Ok(map) = buffer.map_readable() {
+                        latest_data = Some(map.as_slice().to_vec());
+                        frames_drained = 1;
                     }
-                    tracing::info!("Encoded frame #{}: {} bytes, NALs: [{}]", count, data.len(), nal_info.join(", "));
-                } else {
-                    tracing::debug!("H.264 encoded frame: {} bytes", data.len());
+                }
+            }
+        }
+
+        if frames_drained > 1 {
+            tracing::debug!("Encoder: drained {} frames, using latest", frames_drained);
+        }
+
+        match latest_data {
+            Some(data) => {
+                // LATENCY MEASUREMENT: Log encoder output timestamp
+                if count % 30 == 0 {
+                    let ts_out = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let encode_time = encode_start.elapsed().as_millis();
+                    tracing::info!("[LATENCY] ENCODE_OUT frame={} ts={} encode_ms={} size={}", count, ts_out, encode_time, data.len());
                 }
                 Ok(data)
             }
             None => {
-                tracing::debug!("H.264 encoder buffering");
+                if count < 10 {
+                    tracing::debug!("Encoder #{}: no output yet", count);
+                }
                 Ok(vec![])
             }
         }
@@ -507,13 +529,17 @@ impl GstH264Decoder {
         // RTP header extensions used by webrtc-rs. Instead, we feed raw H.264 NAL units.
         // Low latency settings:
         // - appsrc: min-latency=0 prevents buffering, max-bytes=0 for unbounded
-        // - h264parse: minimal processing
+        // - h264parse: minimal processing, outputs frames as soon as complete
         // - RGBA output: compatible with egui's ColorImage::from_rgba_unmultiplied
-        // - appsink: sync=false, max-buffers=1, drop=true for lowest latency
+        // ULTRA LOW LATENCY decoder pipeline
+        // - h264parse with config-interval=-1: Pass through SPS/PPS immediately
+        // - Single minimal queue after decoder only
+        // - do-timestamp=false: Don't add timestamps
+        // - is-live=true: Live source mode
         let pipeline_str = format!(
-            "appsrc name=src format=time is-live=true do-timestamp=true min-latency=0 max-bytes=0 \
+            "appsrc name=src format=time is-live=true do-timestamp=false min-latency=0 max-bytes=0 \
              caps=video/x-h264,stream-format=byte-stream,alignment=nal ! \
-             h264parse ! \
+             h264parse config-interval=-1 ! \
              {} ! \
              videoconvert ! video/x-raw,format=RGBA ! \
              appsink name=sink sync=false max-buffers=1 drop=true emit-signals=false",
@@ -542,6 +568,10 @@ impl GstH264Decoder {
         appsink.set_property("sync", false);
         appsink.set_property("max-buffers", 1u32);
         appsink.set_property("drop", true);
+
+        // ULTRA LOW LATENCY: Disable pipeline clock to prevent any timestamp-based buffering
+        // This ensures frames are processed immediately without waiting for "correct" presentation time
+        pipeline.use_clock(None::<&gst::Clock>);
 
         pipeline.set_state(gst::State::Playing)?;
 
@@ -809,32 +839,41 @@ impl GstH264Decoder {
             }
         }
 
-        // Very low timeout for minimal latency - hardware decoder is fast
-        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(1)) {
-            Some(sample) => {
-                let buffer = sample.buffer().ok_or_else(|| anyhow!("No buffer in sample"))?;
-                let caps = sample.caps().ok_or_else(|| anyhow!("No caps in sample"))?;
+        // ULTRA LOW LATENCY: Drain all available samples and return only the LATEST
+        // This ensures we always display the most recent frame, dropping any buffered older frames
+        let mut latest_frame: Option<VideoFrame> = None;
+        let mut frames_drained = 0u32;
 
-                let video_info = gst_video::VideoInfo::from_caps(caps)?;
-                let width = video_info.width();
-                let height = video_info.height();
+        // Use zero timeout - don't wait, just grab what's available
+        while let Some(sample) = self.appsink.try_pull_sample(gst::ClockTime::ZERO) {
+            frames_drained += 1;
 
-                let map = buffer.map_readable()?;
-                let data = map.as_slice().to_vec();
-
-                // Only log every 100th frame to reduce spam
-                if count % 100 == 0 {
-                    tracing::info!("Decoder produced frame #{}: {}x{}, {} bytes", count, width, height, data.len());
+            if let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) {
+                if let Ok(video_info) = gst_video::VideoInfo::from_caps(caps) {
+                    if let Ok(map) = buffer.map_readable() {
+                        latest_frame = Some(VideoFrame {
+                            width: video_info.width(),
+                            height: video_info.height(),
+                            data: map.as_slice().to_vec(),
+                        });
+                    }
                 }
-                Ok(Some(VideoFrame { width, height, data }))
-            }
-            None => {
-                if count < 10 || count % 100 == 0 {
-                    tracing::debug!("Decoder #{}: no output yet (buffering)", count);
-                }
-                Ok(None)
             }
         }
+
+        if frames_drained > 1 && count < 100 {
+            tracing::debug!("Decoder #{}: drained {} frames, using latest", count, frames_drained);
+        }
+
+        if let Some(ref frame) = latest_frame {
+            if count % 100 == 0 {
+                tracing::info!("Decoder produced frame #{}: {}x{}, {} bytes", count, frame.width, frame.height, frame.data.len());
+            }
+        } else if count < 10 || count % 100 == 0 {
+            tracing::debug!("Decoder #{}: no output yet (buffering)", count);
+        }
+
+        Ok(latest_frame)
     }
 
     pub fn decoder_name(&self) -> &str { &self.decoder_name }

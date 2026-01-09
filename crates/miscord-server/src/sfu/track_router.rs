@@ -213,6 +213,21 @@ impl TrackRouter {
 
     /// Forward an RTP packet to all subscribers
     async fn forward_packet(&self, rtp_packet: &webrtc::rtp::packet::Packet, packet_count: u64) {
+        // LATENCY MEASUREMENT: Log server forward timestamp
+        if packet_count % 30 == 1 {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            tracing::info!(
+                "[LATENCY] SERVER_FWD track={} pkt={} ts={} seq={}",
+                self.track_id,
+                packet_count,
+                ts,
+                rtp_packet.header.sequence_number
+            );
+        }
+
         // Log every 100 packets
         if packet_count % 100 == 1 {
             tracing::info!(

@@ -650,6 +650,17 @@ impl SfuClient {
             ..Default::default()
         };
 
+        // LATENCY MEASUREMENT: Log RTP send timestamp
+        static SEND_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = SEND_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if count % 30 == 0 {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            tracing::info!("[LATENCY] RTP_SEND frame={} ts={}", count, ts);
+        }
+
         track.write_sample(&sample).await?;
         Ok(())
     }
@@ -763,6 +774,17 @@ async fn handle_remote_track(
         match track.read_rtp().await {
             Ok((rtp_packet, _attributes)) => {
                 packet_count += 1;
+
+                // LATENCY MEASUREMENT: Log RTP receive timestamp
+                if packet_count % 30 == 1 {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    tracing::info!("[LATENCY] RTP_RECV user={} type={:?} pkt={} ts={} seq={}",
+                        user_id, track_type, packet_count, ts, rtp_packet.header.sequence_number);
+                }
+
                 if packet_count % 100 == 1 {
                     tracing::info!("Received RTP packet {} for user {} {:?}, payload size: {}",
                         packet_count, user_id, track_type, rtp_packet.payload.len());
@@ -781,9 +803,14 @@ async fn handle_remote_track(
                 // Decode H.264 packet to frame using GStreamer hardware decoder
                 match decoder.decode(&rtp_bytes) {
                     Ok(Some(frame)) => {
-                        // Only log every 100th decoded frame to reduce spam
-                        if packet_count % 100 == 1 {
-                            tracing::info!("Decoded {:?} frame for user {}: {}x{}", track_type, user_id, frame.width, frame.height);
+                        // LATENCY MEASUREMENT: Log decode output timestamp
+                        if packet_count % 30 == 1 {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis();
+                            tracing::info!("[LATENCY] DECODE_OUT user={} type={:?} pkt={} ts={} size={}x{}",
+                                user_id, track_type, packet_count, ts, frame.width, frame.height);
                         }
                         let remote_frame = RemoteVideoFrame {
                             user_id,
