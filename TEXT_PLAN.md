@@ -222,7 +222,7 @@ Another agent is currently working on server, community, and user account manage
   - [ ] Message formatting toolbar (Bold, Italic, Code buttons) - Not yet implemented
 - [x] Phase 2: High Impact Features (partial)
   - [x] Typing indicators (shows "User is typing..." via WebSocket events)
-  - [ ] Unread indicators for text channels - Not yet implemented
+  - [x] Unread indicators for text channels (badge with count, bright text, mark-as-read on select)
   - [x] Message replies/threading - Slack-style threads with side panel, real-time updates
   - [ ] Link previews - Not yet implemented
   - [ ] User mentions (@username) - Not yet implemented
