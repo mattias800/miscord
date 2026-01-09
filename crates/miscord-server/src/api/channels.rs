@@ -184,3 +184,36 @@ pub async fn create_dm(
         .await?;
     Ok(Json(channel))
 }
+
+// Channel read state endpoints
+
+/// Mark a channel as read
+pub async fn mark_channel_read(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<Uuid>,
+) -> Result<()> {
+    state
+        .channel_service
+        .mark_channel_read(channel_id, auth.user_id)
+        .await?;
+    Ok(())
+}
+
+/// Get unread count for a single channel
+pub async fn get_unread_count(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<Uuid>,
+) -> Result<Json<UnreadCountResponse>> {
+    let count = state
+        .channel_service
+        .get_unread_count(channel_id, auth.user_id)
+        .await?;
+    Ok(Json(UnreadCountResponse { unread_count: count }))
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct UnreadCountResponse {
+    pub unread_count: i64,
+}

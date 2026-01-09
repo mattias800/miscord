@@ -1,6 +1,6 @@
 use crate::auth::AuthUser;
 use crate::error::{AppError, Result};
-use crate::models::{Channel, Community, CommunityInvite, CreateChannel, CreateCommunity, PublicUser, UpdateCommunity, UserStatus};
+use crate::models::{Channel, ChannelType, Community, CommunityInvite, CreateChannel, CreateCommunity, PublicUser, UpdateCommunity, UserStatus};
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
@@ -200,7 +200,7 @@ pub async fn list_channels(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(community_id): Path<Uuid>,
-) -> Result<Json<Vec<Channel>>> {
+) -> Result<Json<Vec<miscord_protocol::ChannelData>>> {
     // Check membership
     let is_member = sqlx::query_scalar!(
         "SELECT EXISTS(SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2)",
@@ -216,7 +216,37 @@ pub async fn list_channels(
     }
 
     let channels = state.channel_service.list_by_community(community_id).await?;
-    Ok(Json(channels))
+
+    // Get unread counts for all channels
+    let channel_ids: Vec<Uuid> = channels.iter().map(|c| c.id).collect();
+    let unread_counts = state
+        .channel_service
+        .get_unread_counts_for_channels(&channel_ids, auth.user_id)
+        .await?;
+
+    // Convert to protocol ChannelData with unread counts
+    let channel_data: Vec<miscord_protocol::ChannelData> = channels
+        .into_iter()
+        .map(|c| {
+            let unread_count = unread_counts.get(&c.id).copied().unwrap_or(0);
+            miscord_protocol::ChannelData {
+                id: c.id,
+                community_id: c.community_id,
+                name: c.name,
+                topic: c.topic,
+                channel_type: match c.channel_type {
+                    ChannelType::Text => miscord_protocol::ChannelType::Text,
+                    ChannelType::Voice => miscord_protocol::ChannelType::Voice,
+                    ChannelType::DirectMessage => miscord_protocol::ChannelType::DirectMessage,
+                    ChannelType::GroupDm => miscord_protocol::ChannelType::GroupDm,
+                },
+                position: c.position,
+                unread_count,
+            }
+        })
+        .collect();
+
+    Ok(Json(channel_data))
 }
 
 pub async fn create_channel(

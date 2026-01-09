@@ -201,6 +201,18 @@ impl NetworkClient {
         .await
     }
 
+    /// Mark a channel as read (updates last_read_at on server)
+    pub async fn mark_channel_read(&self, channel_id: Uuid) -> Result<()> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::post_empty_void(
+            &format!("{}/api/channels/{}/read", server_url, channel_id),
+            token.as_deref(),
+        )
+        .await
+    }
+
     pub async fn create_channel(
         &self,
         community_id: Uuid,

@@ -1,5 +1,6 @@
 use crate::error::{AppError, Result};
 use crate::models::{Channel, ChannelType, CreateChannel, UpdateChannel, VoiceState};
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -278,5 +279,107 @@ impl ChannelService {
         .await?;
 
         Ok(channels)
+    }
+
+    // Channel read state operations
+
+    /// Mark a channel as read for a user (upsert last_read_at to now)
+    pub async fn mark_channel_read(&self, channel_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query!(
+            r#"
+            INSERT INTO channel_read_states (user_id, channel_id, last_read_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id, channel_id)
+            DO UPDATE SET last_read_at = NOW()
+            "#,
+            user_id,
+            channel_id
+        )
+        .execute(&self.db)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get the last read timestamp for a user in a channel
+    pub async fn get_last_read_at(
+        &self,
+        channel_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let result = sqlx::query!(
+            r#"
+            SELECT last_read_at FROM channel_read_states
+            WHERE user_id = $1 AND channel_id = $2
+            "#,
+            user_id,
+            channel_id
+        )
+        .fetch_optional(&self.db)
+        .await?;
+
+        Ok(result.map(|r| r.last_read_at))
+    }
+
+    /// Get unread message count for a channel
+    pub async fn get_unread_count(&self, channel_id: Uuid, user_id: Uuid) -> Result<i64> {
+        let result = sqlx::query!(
+            r#"
+            SELECT COUNT(*) as count
+            FROM messages m
+            WHERE m.channel_id = $1
+              AND m.thread_parent_id IS NULL
+              AND m.created_at > COALESCE(
+                  (SELECT last_read_at FROM channel_read_states
+                   WHERE user_id = $2 AND channel_id = $1),
+                  '1970-01-01'::timestamptz
+              )
+            "#,
+            channel_id,
+            user_id
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok(result.count.unwrap_or(0))
+    }
+
+    /// Get unread counts for multiple channels at once
+    pub async fn get_unread_counts_for_channels(
+        &self,
+        channel_ids: &[Uuid],
+        user_id: Uuid,
+    ) -> Result<std::collections::HashMap<Uuid, i64>> {
+        if channel_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let results = sqlx::query!(
+            r#"
+            SELECT
+                m.channel_id,
+                COUNT(*) as count
+            FROM messages m
+            WHERE m.channel_id = ANY($1)
+              AND m.thread_parent_id IS NULL
+              AND m.created_at > COALESCE(
+                  (SELECT last_read_at FROM channel_read_states crs
+                   WHERE crs.user_id = $2 AND crs.channel_id = m.channel_id),
+                  '1970-01-01'::timestamptz
+              )
+            GROUP BY m.channel_id
+            "#,
+            channel_ids,
+            user_id
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut counts = std::collections::HashMap::new();
+        for row in results {
+            counts.insert(row.channel_id, row.count.unwrap_or(0));
+        }
+
+        Ok(counts)
     }
 }

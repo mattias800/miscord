@@ -132,27 +132,59 @@ impl ChannelList {
                     .show(ui, |ui| {
                     for channel in text_channels {
                         let is_selected = current_channel == Some(channel.id);
+                        let has_unread = channel.unread_count > 0;
 
+                        // Bright text for unread channels, muted for read, normal for selected
                         let text_color = if is_selected {
                             theme::TEXT_NORMAL
+                        } else if has_unread {
+                            theme::TEXT_BRIGHT
                         } else {
                             theme::TEXT_MUTED
                         };
 
-                        let response = ui.add(
-                            egui::Button::new(
-                                egui::RichText::new(format!("# {}", channel.name))
-                                    .size(15.0)
-                                    .color(text_color)
+                        let response = ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("# {}", channel.name))
+                                        .size(15.0)
+                                        .color(text_color)
+                                )
+                                .fill(if is_selected {
+                                    theme::BG_ACCENT
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                })
+                                .rounding(egui::Rounding::same(4.0))
+                                .min_size(egui::vec2(ui.available_width() - 32.0, 32.0))
                             )
-                            .fill(if is_selected {
-                                theme::BG_ACCENT
+                        });
+
+                        // Show unread badge inline
+                        if has_unread && !is_selected {
+                            let badge_rect = response.response.rect;
+                            let painter = ui.painter();
+                            let badge_center = egui::pos2(
+                                badge_rect.right() - 16.0,
+                                badge_rect.center().y,
+                            );
+                            let badge_text = if channel.unread_count > 99 {
+                                "99+".to_string()
                             } else {
-                                egui::Color32::TRANSPARENT
-                            })
-                            .rounding(egui::Rounding::same(4.0))
-                            .min_size(egui::vec2(ui.available_width(), 32.0))
-                        );
+                                channel.unread_count.to_string()
+                            };
+                            let badge_radius = 10.0;
+                            painter.circle_filled(badge_center, badge_radius, theme::RED);
+                            painter.text(
+                                badge_center,
+                                egui::Align2::CENTER_CENTER,
+                                &badge_text,
+                                egui::FontId::proportional(10.0),
+                                egui::Color32::WHITE,
+                            );
+                        }
+
+                        let response = response.inner;
 
                         if response.clicked() {
                             let state = state.clone();
@@ -161,6 +193,10 @@ impl ChannelList {
 
                             runtime.spawn(async move {
                                 state.select_channel(channel_id).await;
+
+                                // Mark channel as read locally and on server
+                                state.mark_channel_read(channel_id).await;
+                                let _ = network.mark_channel_read(channel_id).await;
 
                                 // Load messages
                                 if let Ok(messages) = network.get_messages(channel_id, None).await {

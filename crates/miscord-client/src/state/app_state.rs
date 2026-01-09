@@ -267,6 +267,14 @@ impl AppState {
         state.current_channel_id = Some(channel_id);
     }
 
+    /// Mark a channel as read locally (set unread_count to 0)
+    pub async fn mark_channel_read(&self, channel_id: Uuid) {
+        let mut state = self.inner.write().await;
+        if let Some(channel) = state.channels.get_mut(&channel_id) {
+            channel.unread_count = 0;
+        }
+    }
+
     pub async fn join_voice(&self, channel_id: Uuid) {
         let mut state = self.inner.write().await;
         state.voice_channel_id = Some(channel_id);

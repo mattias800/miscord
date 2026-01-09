@@ -44,6 +44,9 @@ pub struct ChannelData {
     pub topic: Option<String>,
     pub channel_type: ChannelType,
     pub position: i32,
+    /// Number of unread messages in this channel (for the current user)
+    #[serde(default)]
+    pub unread_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

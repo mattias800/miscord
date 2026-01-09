@@ -81,6 +81,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/channels/{id}/voice/participants", get(channels::get_voice_participants))
         .route("/api/voice/leave", post(channels::leave_voice))
         .route("/api/voice/state", axum::routing::patch(channels::update_voice_state))
+        // Channel read state routes
+        .route("/api/channels/{id}/read", post(channels::mark_channel_read))
+        .route("/api/channels/{id}/unread", get(channels::get_unread_count))
         // WebSocket endpoint
         .route("/ws", get(ws::handler::ws_handler))
         .layer(TraceLayer::new_for_http())
