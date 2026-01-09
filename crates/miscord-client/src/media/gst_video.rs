@@ -17,7 +17,7 @@ pub struct VideoDeviceInfo {
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>, // RGB data
+    pub data: Vec<u8>, // RGBA data
 }
 
 pub struct GstVideoCapture {
@@ -91,12 +91,12 @@ impl GstVideoCapture {
         let _device_idx = device_index.unwrap_or(0);
 
         // Build GStreamer pipeline for macOS (avfvideosrc) or Linux (v4l2src)
-        // The caps filter must come AFTER videoconvert to force RGB output
+        // The caps filter must come AFTER videoconvert to force RGBA output
         #[cfg(target_os = "macos")]
         let pipeline_str = format!(
             "avfvideosrc device-index={} ! \
              videoconvert ! \
-             video/x-raw,format=RGB ! \
+             video/x-raw,format=RGBA ! \
              videoscale ! \
              appsink name=sink",
             _device_idx
@@ -106,7 +106,7 @@ impl GstVideoCapture {
         let pipeline_str = format!(
             "v4l2src device=/dev/video{} ! \
              videoconvert ! \
-             video/x-raw,format=RGB ! \
+             video/x-raw,format=RGBA ! \
              videoscale ! \
              appsink name=sink",
             _device_idx
@@ -116,7 +116,7 @@ impl GstVideoCapture {
         let pipeline_str = format!(
             "ksvideosrc device-index={} ! \
              videoconvert ! \
-             video/x-raw,format=RGB ! \
+             video/x-raw,format=RGBA ! \
              videoscale ! \
              appsink name=sink",
             _device_idx

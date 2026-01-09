@@ -1,10 +1,16 @@
 use eframe::egui;
+use std::collections::HashMap;
+use std::time::Instant;
+use uuid::Uuid;
 
 use crate::network::NetworkClient;
-use crate::state::AppState;
+use crate::state::{AppState, VoiceParticipant};
 use miscord_protocol::ChannelType;
 
 use super::theme;
+
+/// How often to refresh voice participants for channels we're not in (in seconds)
+const VOICE_PARTICIPANTS_REFRESH_INTERVAL: f32 = 1.0;
 
 pub struct ChannelList {
     show_create_dialog: bool,
@@ -13,6 +19,10 @@ pub struct ChannelList {
     show_invite_dialog: bool,
     invite_code: Option<String>,
     invite_loading: bool,
+    /// Cache of voice participants for channels we're not in
+    voice_participants_cache: HashMap<Uuid, Vec<VoiceParticipant>>,
+    /// Last time we fetched voice participants
+    voice_participants_last_fetch: Option<Instant>,
 }
 
 impl ChannelList {
@@ -24,6 +34,8 @@ impl ChannelList {
             show_invite_dialog: false,
             invite_code: None,
             invite_loading: false,
+            voice_participants_cache: HashMap::new(),
+            voice_participants_last_fetch: None,
         }
     }
 
@@ -146,24 +158,25 @@ impl ChannelList {
                 .collect();
 
             if !voice_channels.is_empty() {
-                ui.collapsing("Voice Channels", |ui| {
-                    for channel in voice_channels {
-                        // Fetch participants from server for all voice channels
-                        let (voice_channel_id, participants, local_speaking) = runtime.block_on(async {
-                            let s = state.read().await;
-                            let voice_channel_id = s.voice_channel_id;
-                            let local_speaking = s.is_speaking;
-                            drop(s); // Release lock before network call
+                // Check if we need to refresh the voice participants cache
+                let should_refresh = self.voice_participants_last_fetch
+                    .map(|t| t.elapsed().as_secs_f32() > VOICE_PARTICIPANTS_REFRESH_INTERVAL)
+                    .unwrap_or(true);
 
-                            // If we're in this channel, use local state; otherwise fetch from server
-                            let participants = if voice_channel_id == Some(channel.id) {
-                                state.get_voice_channel_participants(channel.id).await
-                            } else {
-                                // Fetch from server for channels we're not in
-                                match network.get_voice_participants(channel.id).await {
+                if should_refresh {
+                    // Fetch participants for all voice channels we're not in
+                    let voice_channel_ids: Vec<_> = voice_channels.iter().map(|c| c.id).collect();
+                    let current_voice_channel = runtime.block_on(async {
+                        state.read().await.voice_channel_id
+                    });
+
+                    for channel_id in voice_channel_ids {
+                        if current_voice_channel != Some(channel_id) {
+                            let participants = runtime.block_on(async {
+                                match network.get_voice_participants(channel_id).await {
                                     Ok(server_participants) => {
                                         server_participants.into_iter().map(|p| {
-                                            crate::state::VoiceParticipant {
+                                            VoiceParticipant {
                                                 user_id: p.user_id,
                                                 username: p.username,
                                                 is_muted: p.self_muted,
@@ -177,10 +190,38 @@ impl ChannelList {
                                     }
                                     Err(_) => Vec::new()
                                 }
+                            });
+                            self.voice_participants_cache.insert(channel_id, participants);
+                        }
+                    }
+                    self.voice_participants_last_fetch = Some(Instant::now());
+                }
+
+                ui.collapsing("Voice Channels", |ui| {
+                    for channel in voice_channels {
+                        // Get participants - from local state if we're in the channel, from cache otherwise
+                        let (voice_channel_id, participants, local_speaking) = runtime.block_on(async {
+                            let s = state.read().await;
+                            let voice_channel_id = s.voice_channel_id;
+                            let local_speaking = s.is_speaking;
+
+                            let participants = if voice_channel_id == Some(channel.id) {
+                                // We're in this channel - use local state
+                                s.voice_participants.values().cloned().collect()
+                            } else {
+                                // Use cached data
+                                Vec::new() // Will be filled from cache below
                             };
 
                             (voice_channel_id, participants, local_speaking)
                         });
+
+                        // If not in this channel, use cached participants
+                        let participants = if voice_channel_id != Some(channel.id) {
+                            self.voice_participants_cache.get(&channel.id).cloned().unwrap_or_default()
+                        } else {
+                            participants
+                        };
 
                         let is_connected = voice_channel_id == Some(channel.id);
 

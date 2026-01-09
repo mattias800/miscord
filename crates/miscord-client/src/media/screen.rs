@@ -46,7 +46,7 @@ pub enum CaptureType {
 pub struct ScreenFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>, // RGB data
+    pub data: Vec<u8>, // RGBA data
 }
 
 /// GStreamer-based screen capture
@@ -312,11 +312,16 @@ impl ScreenCapture {
         {
             // macOS: Use avfvideosrc with capture-screen=true
             // device-index selects which display to capture
+            // Low-latency optimizations:
+            // - No videorate (source framerate is stable enough)
+            // - Capture in NV12 (native), convert to RGBA for UI preview
+            // - Encoder will convert RGBA→NV12 but this is fast on modern hardware
+            // - appsink with sync=false, max-buffers=1, drop=true
             Ok(format!(
                 "avfvideosrc capture-screen=true capture-screen-cursor=true device-index={} ! \
-                 videorate ! video/x-raw,framerate={}/1 ! \
-                 {}videoconvert ! video/x-raw,format=RGB ! \
-                 appsink name=sink",
+                 video/x-raw,format=NV12,framerate={}/1 ! \
+                 {}videoconvert ! video/x-raw,format=RGBA ! \
+                 appsink name=sink sync=false max-buffers=1 drop=true",
                 monitor_id, fps, scale_element
             ))
         }

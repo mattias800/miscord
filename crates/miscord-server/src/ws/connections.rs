@@ -151,6 +151,11 @@ impl ConnectionManager {
         let senders = self.senders.read().await;
 
         if let Some(conn_ids) = user_connections.get(&user_id) {
+            tracing::debug!(
+                "send_to_user: user_id={}, connections={:?}",
+                user_id,
+                conn_ids
+            );
             for conn_id in conn_ids {
                 if let Some(sender) = senders.get(conn_id) {
                     if let Err(e) = sender.send(json.clone()) {
@@ -158,6 +163,8 @@ impl ConnectionManager {
                     }
                 }
             }
+        } else {
+            tracing::warn!("send_to_user: user_id={} not found in user_connections", user_id);
         }
     }
 
@@ -170,12 +177,33 @@ impl ConnectionManager {
             }
         };
 
+        // Debug: log which user this connection belongs to
+        let connection_info = self.connection_info.read().await;
+        if let Some(info) = connection_info.get(&connection_id) {
+            tracing::debug!(
+                "send_to_connection: connection_id={}, belongs to user={}",
+                connection_id,
+                info.user_id
+            );
+        } else {
+            tracing::warn!(
+                "send_to_connection: connection_id={} not found in connection_info!",
+                connection_id
+            );
+        }
+        drop(connection_info);
+
         let senders = self.senders.read().await;
 
         if let Some(sender) = senders.get(&connection_id) {
             if let Err(e) = sender.send(json) {
                 tracing::error!("Failed to send message to {}: {}", connection_id, e);
             }
+        } else {
+            tracing::warn!(
+                "send_to_connection: no sender found for connection_id={}",
+                connection_id
+            );
         }
     }
 

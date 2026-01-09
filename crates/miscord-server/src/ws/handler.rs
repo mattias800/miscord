@@ -441,56 +441,83 @@ async fn handle_sfu_offer(
     }
 
     // Workaround: on_track may not fire during renegotiation in webrtc-rs
-    // Poll transceivers to find new remote tracks manually
+    // Spawn a background task that polls for new tracks over time
+    // Tracks aren't immediately available - they appear after ICE completes and RTP flows
     if is_renegotiation {
-        let transceivers = peer_connection.get_transceivers().await;
-        tracing::info!("Checking {} transceivers for new remote tracks during renegotiation", transceivers.len());
+        let state_clone = state.clone();
+        let pc_clone = peer_connection.clone();
 
-        for (idx, transceiver) in transceivers.iter().enumerate() {
-            let receiver = transceiver.receiver().await;
-            let tracks = receiver.tracks().await;
-            let mid = transceiver.mid();
-            let direction = transceiver.direction();
+        tokio::spawn(async move {
+            // Poll for new tracks for up to 5 seconds
+            for attempt in 0..50 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-            tracing::debug!(
-                "Transceiver {}: mid={:?}, direction={:?}, tracks={}",
-                idx, mid, direction, tracks.len()
-            );
+                let transceivers = pc_clone.get_transceivers().await;
 
-            for track in tracks {
-                let stream_id = track.stream_id().to_string();
-                let track_id = track.id().to_string();
+                for transceiver in transceivers.iter() {
+                    let receiver = transceiver.receiver().await;
+                    let tracks = receiver.tracks().await;
 
-                // Skip local tracks
-                if stream_id.starts_with("stream-local") || track_id.is_empty() {
-                    continue;
+                    if attempt == 0 {
+                        let mid = transceiver.mid();
+                        let direction = transceiver.direction();
+                        tracing::debug!(
+                            "Transceiver poll (attempt {}): mid={:?}, direction={:?}, tracks={}",
+                            attempt, mid, direction, tracks.len()
+                        );
+                    }
+
+                    for track in tracks {
+                        let stream_id = track.stream_id().to_string();
+                        let track_id = track.id().to_string();
+
+                        tracing::debug!(
+                            "Transceiver poll track: stream_id={}, track_id={}, attempt={}",
+                            stream_id, track_id, attempt
+                        );
+
+                        // Skip tracks without proper IDs (shouldn't happen but be safe)
+                        if track_id.is_empty() {
+                            tracing::debug!("Skipping track with empty ID");
+                            continue;
+                        }
+
+                        // Detect track type from stream ID
+                        let track_type = if stream_id.contains("screen") {
+                            TrackType::Screen
+                        } else {
+                            TrackType::Webcam
+                        };
+
+                        // Check if we already have a router for this track type from this user
+                        let already_handled = if let Some(session) = state_clone.sfu.get_session(channel_id).await {
+                            session.has_router(user_id, track_type).await
+                        } else {
+                            false
+                        };
+
+                        if !already_handled {
+                            tracing::info!(
+                                "Found new {:?} track via transceiver polling (attempt {}): {} from stream {} for user {}",
+                                track_type, attempt, track_id, stream_id, user_id
+                            );
+
+                            // Handle the track (creates router and notifies subscribers)
+                            handle_incoming_track(state_clone.clone(), channel_id, user_id, track.clone()).await;
+                        }
+                    }
                 }
 
-                // Detect track type from stream ID
-                let track_type = if stream_id.contains("screen") {
-                    TrackType::Screen
-                } else {
-                    TrackType::Webcam
-                };
-
-                // Check if we already have a router for this track type from this user
-                let already_handled = if let Some(session) = state.sfu.get_session(channel_id).await {
-                    session.has_router(user_id, track_type).await
-                } else {
-                    false
-                };
-
-                if !already_handled {
-                    tracing::info!(
-                        "Found new {:?} track via transceiver polling: {} from stream {} for user {}",
-                        track_type, track_id, stream_id, user_id
-                    );
-
-                    // Handle the track (creates router and notifies subscribers)
-                    handle_incoming_track(state.clone(), channel_id, user_id, track.clone()).await;
+                // Check if we found all expected tracks (stop polling early if we did)
+                if let Some(session) = state_clone.sfu.get_session(channel_id).await {
+                    // If we have a screen router now, we're done
+                    if session.has_router(user_id, TrackType::Screen).await {
+                        tracing::info!("Found screen track after {} attempts, stopping poll", attempt + 1);
+                        break;
+                    }
                 }
             }
-        }
+        });
     }
 
     // Add existing tracks from other publishers to this peer connection
@@ -637,6 +664,19 @@ async fn handle_incoming_track(
     if kind != RTPCodecType::Video {
         tracing::debug!("Ignoring non-video track: {:?}", kind);
         return;
+    }
+
+    // Check if we already have a router for this user and track type
+    // This can happen during renegotiation when on_track fires multiple times
+    if let Some(session) = state.sfu.get_session(channel_id).await {
+        if session.has_router(user_id, track_type).await {
+            tracing::info!(
+                "Router already exists for user {} track type {:?}, skipping duplicate",
+                user_id,
+                track_type
+            );
+            return;
+        }
     }
 
     // Create track router with track type
@@ -852,15 +892,45 @@ async fn handle_sfu_subscribe_track(
         }
 
         // Trigger renegotiation
-        if let Ok(offer) = pc.create_offer(None).await {
-            if pc.set_local_description(offer.clone()).await.is_ok() {
-                state
-                    .connections
-                    .send_to_connection(
-                        connection_id,
-                        &ServerMessage::SfuRenegotiate { sdp: offer.sdp },
-                    )
-                    .await;
+        let signaling_state = pc.signaling_state();
+        tracing::info!(
+            "Attempting renegotiation for subscriber {} (connection_id: {}), signaling state: {:?}",
+            subscriber_id,
+            connection_id,
+            signaling_state
+        );
+
+        match pc.create_offer(None).await {
+            Ok(offer) => {
+                match pc.set_local_description(offer.clone()).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Sending SfuRenegotiate to subscriber {} for {:?} track",
+                            subscriber_id,
+                            track_type
+                        );
+                        state
+                            .connections
+                            .send_to_connection(
+                                connection_id,
+                                &ServerMessage::SfuRenegotiate { sdp: offer.sdp },
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to set local description for renegotiation: {}",
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to create offer for renegotiation (signaling state: {:?}): {}",
+                    signaling_state,
+                    e
+                );
             }
         }
 

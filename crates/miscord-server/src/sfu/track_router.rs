@@ -78,7 +78,97 @@ impl TrackRouter {
             self.publisher_id
         );
 
-        let mut packet_count = 0u64;
+        // Wait for the track receiver to be ready
+        // The RTPReceiver may not be attached immediately after track detection
+        let mut retry_count = 0;
+        let max_retries = 50; // 5 seconds max wait
+
+        loop {
+            if !*self.active.read().await {
+                tracing::info!("Track router {} stopped before receiving packets", self.track_id);
+                return;
+            }
+
+            // Add timeout to diagnose blocking read_rtp
+            let read_result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(2),
+                self.source_track.read_rtp()
+            ).await;
+
+            match read_result {
+                Err(_) => {
+                    // Timeout - read_rtp is blocking
+                    retry_count += 1;
+                    if retry_count == 1 || retry_count % 5 == 0 {
+                        tracing::warn!(
+                            "Track {} read_rtp timeout (attempt {}) - no packets arriving",
+                            self.track_id,
+                            retry_count
+                        );
+                    }
+                    if retry_count > 30 {
+                        tracing::error!("Track {} never received packets after {} timeouts", self.track_id, retry_count);
+                        *self.active.write().await = false;
+                        return;
+                    }
+                    continue;
+                }
+                Ok(Ok((rtp_packet, _attributes))) => {
+                    // First packet received - track is ready
+                    tracing::info!(
+                        "Track {} ready - received first RTP packet (payload: {} bytes)",
+                        self.track_id,
+                        rtp_packet.payload.len()
+                    );
+
+                    // Forward this first packet and continue with the main loop
+                    self.forward_packet(&rtp_packet, 1).await;
+                    break;
+                }
+                Ok(Err(e)) => {
+                    let error_msg = e.to_string();
+
+                    // Track closed - stop
+                    if error_msg.contains("closed") {
+                        tracing::info!("Source track closed for {} before receiving packets", self.track_id);
+                        *self.active.write().await = false;
+                        return;
+                    }
+
+                    // RTPReceiver not ready - wait and retry
+                    if error_msg.contains("RTPReceiver must not be nil") {
+                        retry_count += 1;
+                        if retry_count > max_retries {
+                            tracing::error!(
+                                "Track {} never became ready after {} retries",
+                                self.track_id,
+                                max_retries
+                            );
+                            *self.active.write().await = false;
+                            return;
+                        }
+
+                        if retry_count == 1 || retry_count % 10 == 0 {
+                            tracing::info!(
+                                "Waiting for track {} receiver to be ready (attempt {})",
+                                self.track_id,
+                                retry_count
+                            );
+                        }
+
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+
+                    // Other error - log and continue trying
+                    tracing::warn!("Error reading RTP from source track {}: {}", self.track_id, e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+
+        // Main forwarding loop
+        let mut packet_count = 1u64; // Already forwarded one packet
 
         loop {
             // Check if still active (less frequently to reduce lock contention)
@@ -91,46 +181,28 @@ impl TrackRouter {
             match self.source_track.read_rtp().await {
                 Ok((rtp_packet, _attributes)) => {
                     packet_count += 1;
-
-                    // Log every 100 packets
-                    if packet_count % 100 == 1 {
-                        tracing::info!(
-                            "Forwarding RTP packet {} from {} (payload: {} bytes, seq: {}, ts: {})",
-                            packet_count,
-                            self.publisher_id,
-                            rtp_packet.payload.len(),
-                            rtp_packet.header.sequence_number,
-                            rtp_packet.header.timestamp
-                        );
-                    }
-
-                    // Forward the complete RTP packet to all subscribers
-                    // This preserves H.264 FU-A fragmentation headers
-                    let subscribers = self.subscriber_tracks.read().await;
-                    let subscriber_count = subscribers.len();
-
-                    for (subscriber_id, local_track) in subscribers.iter() {
-                        if let Err(e) = local_track.write_rtp(&rtp_packet).await {
-                            tracing::warn!(
-                                "Failed to forward RTP to subscriber {}: {}",
-                                subscriber_id,
-                                e
-                            );
-                        }
-                    }
-
-                    // Log subscriber info occasionally
-                    if packet_count % 100 == 1 {
-                        tracing::debug!("Forwarded to {} subscribers", subscriber_count);
-                    }
+                    self.forward_packet(&rtp_packet, packet_count).await;
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+
                     // Check if error is due to track being closed
-                    if e.to_string().contains("closed") {
+                    if error_msg.contains("closed") {
                         tracing::info!("Source track closed for {}", self.track_id);
                         break;
                     }
-                    tracing::warn!("Error reading RTP from source track: {}", e);
+
+                    // RTPReceiver not ready - this can happen during renegotiation
+                    // Just skip this iteration silently
+                    if error_msg.contains("RTPReceiver must not be nil") {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        continue;
+                    }
+
+                    // Log other errors (but only occasionally to avoid spam)
+                    if packet_count % 100 == 1 {
+                        tracing::warn!("Error reading RTP from source track: {}", e);
+                    }
                 }
             }
         }
@@ -139,16 +211,69 @@ impl TrackRouter {
         *self.active.write().await = false;
     }
 
+    /// Forward an RTP packet to all subscribers
+    async fn forward_packet(&self, rtp_packet: &webrtc::rtp::packet::Packet, packet_count: u64) {
+        // Log every 100 packets
+        if packet_count % 100 == 1 {
+            tracing::info!(
+                "Forwarding RTP packet {} from {} (payload: {} bytes, seq: {}, ts: {})",
+                packet_count,
+                self.publisher_id,
+                rtp_packet.payload.len(),
+                rtp_packet.header.sequence_number,
+                rtp_packet.header.timestamp
+            );
+        }
+
+        // Forward the complete RTP packet to all subscribers
+        // This preserves H.264 FU-A fragmentation headers
+        let subscribers = self.subscriber_tracks.read().await;
+        let subscriber_count = subscribers.len();
+
+        for (subscriber_id, local_track) in subscribers.iter() {
+            if let Err(e) = local_track.write_rtp(rtp_packet).await {
+                tracing::warn!(
+                    "Failed to forward RTP to subscriber {}: {}",
+                    subscriber_id,
+                    e
+                );
+            }
+        }
+
+        // Log subscriber info occasionally
+        if packet_count % 100 == 1 {
+            tracing::debug!("Forwarded to {} subscribers", subscriber_count);
+        }
+    }
+
     /// Add a subscriber to receive forwarded RTP packets
     pub async fn add_subscriber(&self, subscriber_id: Uuid) -> Arc<TrackLocalStaticRTP> {
-        // Create a local track for this subscriber with the same codec as source
-        let codec = self.source_track.codec();
+        // Create a local track for this subscriber
+        // IMPORTANT: We must use a codec capability that exactly matches what's registered
+        // in the MediaEngine, not the capability from the source track (which may have
+        // different fmtp parameters). Otherwise add_track fails with "no codecs".
+        let source_codec = self.source_track.codec();
+        tracing::info!(
+            "Creating subscriber track for {} - source codec: {:?}",
+            subscriber_id,
+            source_codec.capability
+        );
+
+        // Use hardcoded H.264 capability matching the MediaEngine registration
+        let h264_capability = webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability {
+            mime_type: "video/H264".to_string(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                .to_string(),
+            rtcp_feedback: vec![],
+        };
 
         // Stream ID format: stream-{user_id}-{track_type}
         // This allows clients to identify both the publisher and the track type
         // Using TrackLocalStaticRTP for direct RTP forwarding preserves H.264 packetization
         let local_track = Arc::new(TrackLocalStaticRTP::new(
-            codec.capability.clone(),
+            h264_capability,
             format!("{}-{}", self.track_id, subscriber_id),
             format!("stream-{}-{}", self.publisher_id, self.track_type),
         ));

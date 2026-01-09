@@ -50,6 +50,8 @@ pub struct VoiceChannelView {
     screen_picker: ScreenPickerDialog,
     /// FPS for screen sharing (configurable)
     screen_share_fps: u32,
+    /// User ID of the screen share currently in fullscreen mode (None = not fullscreen)
+    fullscreen_screen_user: Option<Uuid>,
 }
 
 impl VoiceChannelView {
@@ -69,7 +71,22 @@ impl VoiceChannelView {
             sfu_channel_id: None,
             screen_picker: ScreenPickerDialog::new(),
             screen_share_fps: 30, // Default to 30fps
+            fullscreen_screen_user: None,
         }
+    }
+
+    /// Toggle fullscreen mode for a screen share
+    fn toggle_fullscreen_screen(&mut self, user_id: Uuid) {
+        if self.fullscreen_screen_user == Some(user_id) {
+            self.fullscreen_screen_user = None;
+        } else {
+            self.fullscreen_screen_user = Some(user_id);
+        }
+    }
+
+    /// Check if a screen share is in fullscreen mode
+    fn is_screen_fullscreen(&self, user_id: Uuid) -> bool {
+        self.fullscreen_screen_user == Some(user_id)
     }
 
     /// Open the screen picker dialog
@@ -223,7 +240,7 @@ impl VoiceChannelView {
         // Update local video texture if capturing
         if let Some(capture) = &self.video_capture {
             if let Some(frame) = capture.get_frame() {
-                let image = ColorImage::from_rgb(
+                let image = ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
                     &frame.data,
                 );
@@ -319,7 +336,7 @@ impl VoiceChannelView {
         // Update local screen texture and send to SFU
         if let Some(capture) = &self.screen_capture {
             if let Some(screen_frame) = capture.get_frame() {
-                let image = ColorImage::from_rgb(
+                let image = ColorImage::from_rgba_unmultiplied(
                     [screen_frame.width as usize, screen_frame.height as usize],
                     &screen_frame.data,
                 );
@@ -420,6 +437,21 @@ impl VoiceChannelView {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, theme::BG_PRIMARY);
 
+        // Check if we're in fullscreen mode for a screen share
+        if let Some(fullscreen_user_id) = self.fullscreen_screen_user {
+            // Find the participant info for the fullscreen user
+            let participant = participants.iter().find(|p| p.user_id == fullscreen_user_id);
+
+            // If user is no longer sharing or not found, exit fullscreen
+            if participant.map(|p| p.is_screen_sharing).unwrap_or(false) {
+                self.render_fullscreen_screen(ui, fullscreen_user_id, participant.map(|p| p.username.as_str()).unwrap_or("Unknown"));
+                return;
+            } else {
+                // User stopped sharing, exit fullscreen
+                self.fullscreen_screen_user = None;
+            }
+        }
+
         ui.vertical(|ui| {
             // Header
             ui.add_space(16.0);
@@ -447,6 +479,93 @@ impl VoiceChannelView {
                 available_size,
             );
         });
+    }
+
+    /// Render fullscreen view for a screen share
+    fn render_fullscreen_screen(&mut self, ui: &mut egui::Ui, user_id: Uuid, username: &str) {
+        let rect = ui.available_rect_before_wrap();
+        let (response_rect, response) = ui.allocate_exact_size(rect.size(), egui::Sense::click());
+        let painter = ui.painter_at(response_rect);
+
+        // Black background for fullscreen
+        painter.rect_filled(response_rect, 0.0, Color32::BLACK);
+
+        // Render the screen share texture
+        if let Some(texture) = self.remote_screen_textures.get(&user_id) {
+            let tex_size = texture.size_vec2();
+            let scale = (response_rect.width() / tex_size.x)
+                .min(response_rect.height() / tex_size.y);
+            let video_size = tex_size * scale;
+            let video_rect = egui::Rect::from_center_size(response_rect.center(), video_size);
+
+            painter.image(
+                texture.id(),
+                video_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            // No frames yet
+            painter.text(
+                response_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "🖥️ Loading...",
+                egui::FontId::proportional(24.0),
+                theme::TEXT_MUTED,
+            );
+        }
+
+        // Exit fullscreen button in upper right corner
+        let button_size = 36.0;
+        let button_margin = 16.0;
+        let button_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                response_rect.max.x - button_size - button_margin,
+                response_rect.min.y + button_margin,
+            ),
+            Vec2::splat(button_size),
+        );
+
+        // Check if mouse is over the button
+        let mouse_pos = ui.input(|i| i.pointer.hover_pos());
+        let button_hovered = mouse_pos.map(|p| button_rect.contains(p)).unwrap_or(false);
+
+        // Draw button background
+        let button_bg = if button_hovered {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 80)
+        } else {
+            Color32::from_rgba_unmultiplied(0, 0, 0, 150)
+        };
+        painter.rect_filled(button_rect, 6.0, button_bg);
+
+        // Draw exit fullscreen icon
+        painter.text(
+            button_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "✕",
+            egui::FontId::proportional(20.0),
+            Color32::WHITE,
+        );
+
+        // Username label at bottom
+        let label_height = 40.0;
+        let label_rect = egui::Rect::from_min_max(
+            egui::pos2(response_rect.min.x, response_rect.max.y - label_height),
+            response_rect.max,
+        );
+        painter.rect_filled(label_rect, 0.0, Color32::from_black_alpha(180));
+        painter.text(
+            label_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &format!("{}'s screen", username),
+            egui::FontId::proportional(16.0),
+            Color32::WHITE,
+        );
+
+        // Handle click - exit fullscreen when clicking the button
+        if response.clicked() && button_hovered {
+            self.fullscreen_screen_user = None;
+        }
     }
 
     fn render_participant_grid(
@@ -644,9 +763,48 @@ impl VoiceChannelView {
                     );
                 }
 
-                // Click to stop watching
+                // Fullscreen button in upper right corner
+                let is_fullscreen = self.is_screen_fullscreen(participant.user_id);
+                let button_size = 28.0;
+                let button_margin = 8.0;
+                let button_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        rect.max.x - button_size - button_margin,
+                        rect.min.y + button_margin,
+                    ),
+                    Vec2::splat(button_size),
+                );
+
+                // Check if mouse is over the button
+                let mouse_pos = ui.input(|i| i.pointer.hover_pos());
+                let button_hovered = mouse_pos.map(|p| button_rect.contains(p)).unwrap_or(false);
+
+                // Draw button background
+                let button_bg = if button_hovered {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 60)
+                } else {
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 120)
+                };
+                painter.rect_filled(button_rect, 4.0, button_bg);
+
+                // Draw fullscreen icon (expand or compress)
+                let icon = if is_fullscreen { "⛶" } else { "⛶" }; // Use same icon, could use different ones
+                painter.text(
+                    button_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icon,
+                    egui::FontId::proportional(16.0),
+                    Color32::WHITE,
+                );
+
+                // Handle button click (check button first, then main area)
                 if response.clicked() {
-                    self.toggle_watch_screen(participant.user_id);
+                    if button_hovered {
+                        self.toggle_fullscreen_screen(participant.user_id);
+                    } else {
+                        // Click outside button stops watching
+                        self.toggle_watch_screen(participant.user_id);
+                    }
                 }
             } else {
                 // Not watching - show "Watch" prompt
@@ -887,10 +1045,6 @@ impl VoiceChannelView {
         let channel_changed = self.sfu_channel_id != voice_channel_id;
         let has_sfu = self.sfu_client.is_some();
 
-        tracing::info!(
-            "SFU state check: voice_channel={:?}, should_connect_sfu={}, should_connect={}, channel_changed={}, has_sfu={}",
-            voice_channel_id, should_connect_sfu, should_connect, channel_changed, has_sfu
-        );
 
         if should_connect && (self.sfu_client.is_none() || channel_changed) {
             // Connect to SFU
@@ -954,6 +1108,9 @@ impl VoiceChannelView {
             self.sfu_channel_id = None;
             self.ice_candidate_rx = None;
             self.remote_textures.clear();
+            self.remote_screen_textures.clear();
+            self.watching_screens.clear();
+            self.fullscreen_screen_user = None;
         }
     }
 
@@ -1072,22 +1229,37 @@ impl VoiceChannelView {
 
             for user_id in remote_users {
                 if let Some(frame) = runtime.block_on(sfu.get_remote_webcam_frame(user_id)) {
-                    if frame.data.len() >= (frame.width * frame.height * 3) as usize {
-                        let image = ColorImage::from_rgb(
-                            [frame.width as usize, frame.height as usize],
-                            &frame.data,
-                        );
+                    // Validate frame dimensions to prevent panics from corrupted data
+                    let expected_size = (frame.width as usize)
+                        .saturating_mul(frame.height as usize)
+                        .saturating_mul(4);
 
-                        if let Some(texture) = self.remote_textures.get_mut(&user_id) {
-                            texture.set(image, TextureOptions::default());
-                        } else {
-                            let texture = ctx.load_texture(
-                                format!("remote_video_{}", user_id),
-                                image,
-                                TextureOptions::default(),
-                            );
-                            self.remote_textures.insert(user_id, texture);
-                        }
+                    // Skip invalid frames (corrupted, zero-size, or mismatched data)
+                    if frame.width == 0 || frame.height == 0
+                        || frame.width > 8192 || frame.height > 8192
+                        || frame.data.len() != expected_size
+                    {
+                        tracing::warn!(
+                            "Skipping invalid webcam frame from {}: {}x{}, data_len={}, expected={}",
+                            user_id, frame.width, frame.height, frame.data.len(), expected_size
+                        );
+                        continue;
+                    }
+
+                    let image = ColorImage::from_rgba_unmultiplied(
+                        [frame.width as usize, frame.height as usize],
+                        &frame.data,
+                    );
+
+                    if let Some(texture) = self.remote_textures.get_mut(&user_id) {
+                        texture.set(image, TextureOptions::default());
+                    } else {
+                        let texture = ctx.load_texture(
+                            format!("remote_video_{}", user_id),
+                            image,
+                            TextureOptions::default(),
+                        );
+                        self.remote_textures.insert(user_id, texture);
                     }
                 }
             }
@@ -1095,22 +1267,37 @@ impl VoiceChannelView {
             // Update screen share textures for users we're watching
             for &user_id in &self.watching_screens.clone() {
                 if let Some(frame) = runtime.block_on(sfu.get_remote_screen_frame(user_id)) {
-                    if frame.data.len() >= (frame.width * frame.height * 3) as usize {
-                        let image = ColorImage::from_rgb(
-                            [frame.width as usize, frame.height as usize],
-                            &frame.data,
-                        );
+                    // Validate frame dimensions to prevent panics from corrupted data
+                    let expected_size = (frame.width as usize)
+                        .saturating_mul(frame.height as usize)
+                        .saturating_mul(4);
 
-                        if let Some(texture) = self.remote_screen_textures.get_mut(&user_id) {
-                            texture.set(image, TextureOptions::default());
-                        } else {
-                            let texture = ctx.load_texture(
-                                format!("remote_screen_{}", user_id),
-                                image,
-                                TextureOptions::default(),
-                            );
-                            self.remote_screen_textures.insert(user_id, texture);
-                        }
+                    // Skip invalid frames (corrupted, zero-size, or mismatched data)
+                    if frame.width == 0 || frame.height == 0
+                        || frame.width > 8192 || frame.height > 8192
+                        || frame.data.len() != expected_size
+                    {
+                        tracing::warn!(
+                            "Skipping invalid screen frame from {}: {}x{}, data_len={}, expected={}",
+                            user_id, frame.width, frame.height, frame.data.len(), expected_size
+                        );
+                        continue;
+                    }
+
+                    let image = ColorImage::from_rgba_unmultiplied(
+                        [frame.width as usize, frame.height as usize],
+                        &frame.data,
+                    );
+
+                    if let Some(texture) = self.remote_screen_textures.get_mut(&user_id) {
+                        texture.set(image, TextureOptions::default());
+                    } else {
+                        let texture = ctx.load_texture(
+                            format!("remote_screen_{}", user_id),
+                            image,
+                            TextureOptions::default(),
+                        );
+                        self.remote_screen_textures.insert(user_id, texture);
                     }
                 }
             }
@@ -1120,6 +1307,7 @@ impl VoiceChannelView {
     /// Clean up resources
     pub fn cleanup(&mut self) {
         self.stop_video();
+        self.stop_screen_share();
         self.vad = None;
 
         // Disconnect SFU
@@ -1130,6 +1318,9 @@ impl VoiceChannelView {
         self.sfu_channel_id = None;
         self.ice_candidate_rx = None;
         self.remote_textures.clear();
+        self.remote_screen_textures.clear();
+        self.watching_screens.clear();
+        self.fullscreen_screen_user = None;
     }
 }
 

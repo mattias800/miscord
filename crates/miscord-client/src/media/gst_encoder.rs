@@ -107,16 +107,17 @@ fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
         "vtenc_h264_hw" | "vtenc_h264" => {
             // VideoToolbox encoder (macOS)
             // vtenc_h264_hw is hardware-only, vtenc_h264 may fall back to software
-            // allow-frame-reordering=false disables B-frames for lower latency
-            // realtime=true minimizes internal buffering for lowest latency
-            // max-keyframe-interval ensures keyframes every second
-            // name=encoder allows us to find it later for force-keyframe
-            // h264parse config-interval=-1 inserts SPS/PPS before every IDR
-            // stream-format=byte-stream ensures Annex B output (start codes, not length prefixed)
+            // Low-latency optimizations:
+            // - allow-frame-reordering=false disables B-frames
+            // - realtime=true minimizes internal buffering
+            // - max-keyframe-interval=30 (1 keyframe per second at 30fps)
+            // h264parse config-interval=1 inserts SPS/PPS frequently for quick decoder start
+            // stream-format=byte-stream ensures Annex B output
+            // Note: usage property (VideoChat mode) not available in this GStreamer version
             format!(
-                "{} name=encoder allow-frame-reordering=false realtime=true max-keyframe-interval=30 \
-                 max-keyframe-interval-duration=1000000000 bitrate={} ! \
-                 h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au",
+                "{} name=encoder realtime=true allow-frame-reordering=false \
+                 max-keyframe-interval=30 bitrate={} ! \
+                 h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 encoder,
                 bitrate / 1000  // vtenc uses kbps
             )
@@ -232,14 +233,17 @@ impl GstH264Encoder {
         let encoder_segment = build_encoder_pipeline(encoder, bitrate);
 
         // Full pipeline: appsrc → videoconvert → hw_encoder → h264parse → appsink
-        // Note: Using I420 format which is widely supported by hardware encoders
-        // and may have better hardware conversion paths than NV12 on some platforms
+        // Low-latency optimizations:
+        // - min-latency=0 on appsrc prevents buffering before push
+        // - RGBA input (from screen capture), fast GPU conversion to NV12
+        // - NV12 is native format for VideoToolbox encoder
+        // - max-buffers=1 drop=true on appsink for lowest latency
         let pipeline_str = format!(
-            "appsrc name=src format=time is-live=true do-timestamp=true \
-             caps=video/x-raw,format=RGB,width={},height={},framerate={}/1 ! \
-             videoconvert ! video/x-raw,format=I420 ! \
+            "appsrc name=src format=time is-live=true do-timestamp=true min-latency=0 \
+             caps=video/x-raw,format=RGBA,width={},height={},framerate={}/1 ! \
+             videoconvert ! video/x-raw,format=NV12 ! \
              {} ! \
-             appsink name=sink sync=false max-buffers=2 drop=true",
+             appsink name=sink sync=false max-buffers=1 drop=true",
             width, height, fps, encoder_segment
         );
 
@@ -345,11 +349,12 @@ impl GstH264Encoder {
             ));
         }
 
-        let expected_size = (self.width * self.height * 3) as usize;
+        // RGBA format: 4 bytes per pixel
+        let expected_size = (self.width * self.height * 4) as usize;
         if frame.data.len() != expected_size {
             return Err(anyhow!(
-                "Frame data size mismatch: expected {}, got {}",
-                expected_size, frame.data.len()
+                "Frame data size mismatch: expected {} (RGBA {}x{}), got {}",
+                expected_size, self.width, self.height, frame.data.len()
             ));
         }
 
@@ -487,15 +492,16 @@ impl GstH264Decoder {
         // Note: We manually depayload RTP because GStreamer's rtph264depay has issues with
         // RTP header extensions used by webrtc-rs. Instead, we feed raw H.264 NAL units.
         // Low latency settings:
-        // - appsrc: is-live=true, do-timestamp=true, max-bytes=0 for unbounded buffer
-        // - h264parse: config-interval=0 disables re-inserting config data
+        // - appsrc: min-latency=0 prevents buffering, max-bytes=0 for unbounded
+        // - h264parse: minimal processing
+        // - RGBA output: compatible with egui's ColorImage::from_rgba_unmultiplied
         // - appsink: sync=false, max-buffers=1, drop=true for lowest latency
         let pipeline_str = format!(
-            "appsrc name=src format=time is-live=true do-timestamp=true max-bytes=0 \
+            "appsrc name=src format=time is-live=true do-timestamp=true min-latency=0 max-bytes=0 \
              caps=video/x-h264,stream-format=byte-stream,alignment=nal ! \
-             h264parse config-interval=0 ! \
+             h264parse ! \
              {} ! \
-             videoconvert ! video/x-raw,format=RGB ! \
+             videoconvert ! video/x-raw,format=RGBA ! \
              appsink name=sink sync=false max-buffers=1 drop=true emit-signals=false",
             decoder_segment
         );
@@ -641,6 +647,15 @@ impl GstH264Decoder {
                     fu_buffer.clear();
                     fu_buffer.push(reconstructed_nal_header);
                     fu_buffer.extend_from_slice(&payload[2..]);
+                } else if fu_buffer.is_empty() {
+                    // Continuation packet but we missed the start - discard
+                    // Only log occasionally to avoid spam
+                    static DISCARD_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let count = DISCARD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if count % 100 == 0 {
+                        tracing::warn!("FU-A continuation without start, discarding (packet loss?) - {} total", count + 1);
+                    }
+                    return Ok(Vec::new());
                 } else {
                     // Continuation of fragmented NAL unit
                     fu_buffer.extend_from_slice(&payload[2..]);
@@ -648,6 +663,12 @@ impl GstH264Decoder {
 
                 if end_bit == 1 {
                     // End of fragmented NAL unit - output the complete NAL
+                    // Validate minimum NAL size (header + some data)
+                    if fu_buffer.len() < 2 {
+                        tracing::warn!("FU-A assembled NAL too small ({} bytes), discarding", fu_buffer.len());
+                        fu_buffer.clear();
+                        return Ok(Vec::new());
+                    }
                     let mut result = vec![0x00, 0x00, 0x00, 0x01];
                     result.append(&mut *fu_buffer);
                     Ok(result)
@@ -782,7 +803,10 @@ impl GstH264Decoder {
                 let map = buffer.map_readable()?;
                 let data = map.as_slice().to_vec();
 
-                tracing::info!("Decoder produced frame: {}x{}", width, height);
+                // Only log every 100th frame to reduce spam
+                if count % 100 == 0 {
+                    tracing::info!("Decoder produced frame #{}: {}x{}, {} bytes", count, width, height, data.len());
+                }
                 Ok(Some(VideoFrame { width, height, data }))
             }
             None => {

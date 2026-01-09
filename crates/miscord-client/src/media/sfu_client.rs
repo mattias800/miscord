@@ -34,7 +34,7 @@ pub struct RemoteVideoFrame {
     pub track_type: TrackType,
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>, // RGB data
+    pub data: Vec<u8>, // RGBA data
 }
 
 /// Channel for sending ICE candidates to the signaling layer
@@ -57,6 +57,8 @@ pub struct SfuClient {
     local_screen_track: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
     /// Remote frames keyed by (user_id, track_type)
     remote_frames: Arc<RwLock<HashMap<(Uuid, TrackType), RemoteVideoFrame>>>,
+    /// Tracks that have handlers already started (to prevent duplicate handlers)
+    handled_tracks: Arc<RwLock<std::collections::HashSet<(Uuid, TrackType)>>>,
     ice_candidate_tx: Arc<RwLock<Option<IceCandidateSender>>>,
     channel_id: Arc<RwLock<Option<Uuid>>>,
     /// VP8 encoder for local webcam video
@@ -73,6 +75,7 @@ impl SfuClient {
             local_video_track: Arc::new(RwLock::new(None)),
             local_screen_track: Arc::new(RwLock::new(None)),
             remote_frames: Arc::new(RwLock::new(HashMap::new())),
+            handled_tracks: Arc::new(RwLock::new(std::collections::HashSet::new())),
             ice_candidate_tx: Arc::new(RwLock::new(None)),
             channel_id: Arc::new(RwLock::new(None)),
             encoder: Arc::new(Mutex::new(None)),
@@ -271,16 +274,34 @@ impl SfuClient {
         // webrtc-rs may not fire on_track for new tracks during renegotiation
         // unless the callback is re-registered
         let remote_frames_callback = self.remote_frames.clone();
+        let handled_tracks_callback = self.handled_tracks.clone();
         tracing::info!("Re-registering on_track callback for renegotiation");
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
+            let stream_id = track.stream_id().to_string();
             tracing::info!(
                 "on_track FIRED during renegotiation! Track ID: {}, Stream ID: {}, Kind: {:?}",
                 track.id(),
-                track.stream_id(),
+                stream_id,
                 track.kind()
             );
             let frames = remote_frames_callback.clone();
+            let handled = handled_tracks_callback.clone();
             Box::pin(async move {
+                // Check if we already have a handler for this track
+                if let Some((user_id, track_type)) = parse_stream_id(&stream_id) {
+                    {
+                        let mut handled_guard = handled.write().await;
+                        if handled_guard.contains(&(user_id, track_type)) {
+                            tracing::info!(
+                                "on_track: Track already handled for user {} {:?}, skipping",
+                                user_id, track_type
+                            );
+                            return;
+                        }
+                        handled_guard.insert((user_id, track_type));
+                    }
+                    tracing::info!("on_track: Starting handler for user {} {:?}", user_id, track_type);
+                }
                 handle_remote_track(track, frames).await;
             })
         }));
@@ -295,57 +316,87 @@ impl SfuClient {
 
         // Workaround: on_track may not fire during renegotiation in webrtc-rs
         // Poll transceivers to find new remote tracks manually
+        // Use a retry loop because tracks may take time to appear after SDP exchange
         let remote_frames = self.remote_frames.clone();
-        let transceivers = pc.get_transceivers().await;
-        tracing::info!("Checking {} transceivers for new remote tracks", transceivers.len());
+        let pc_clone = pc.clone();
 
-        for (idx, transceiver) in transceivers.iter().enumerate() {
-            let receiver = transceiver.receiver().await;
-            let tracks = receiver.tracks().await;
-            let mid = transceiver.mid();
-            let direction = transceiver.direction();
-            let current_dir = transceiver.current_direction();
+        // Spawn background task to poll for new tracks with retries
+        let handled_tracks = self.handled_tracks.clone();
+        tokio::spawn(async move {
+            let mut attempts = 0;
+            let max_attempts = 20; // 2 seconds max wait
+            let mut new_tracks_found = 0;
 
-            tracing::info!(
-                "Transceiver {}: mid={:?}, direction={:?}, current={:?}, tracks={}",
-                idx, mid, direction, current_dir, tracks.len()
-            );
+            while attempts < max_attempts {
+                let transceivers = pc_clone.get_transceivers().await;
 
-            for track in tracks {
-                let stream_id = track.stream_id().to_string();
-                let track_id = track.id().to_string();
-
-                tracing::info!(
-                    "  Track: id={}, stream_id={}, kind={:?}",
-                    track_id, stream_id, track.kind()
-                );
-
-                // Skip local tracks and tracks we're already handling
-                if stream_id.starts_with("stream-local") || track_id.is_empty() {
-                    continue;
+                if attempts == 0 {
+                    tracing::info!("Checking {} transceivers for new remote tracks", transceivers.len());
                 }
 
-                // Parse user ID and track type from stream ID
-                if let Some((user_id, track_type)) = parse_stream_id(&stream_id) {
-                    // Check if we already have a frame for this track (meaning we're handling it)
-                    let already_handled = remote_frames.read().await.contains_key(&(user_id, track_type));
+                for (idx, transceiver) in transceivers.iter().enumerate() {
+                    let receiver = transceiver.receiver().await;
+                    let tracks = receiver.tracks().await;
+                    let mid = transceiver.mid();
+                    let direction = transceiver.direction();
+                    let current_dir = transceiver.current_direction();
 
-                    if !already_handled {
+                    if attempts == 0 || (attempts % 5 == 0 && tracks.is_empty()) {
                         tracing::info!(
-                            "Found new remote track via transceiver polling: {} from stream {} (user: {}, type: {:?})",
-                            track_id, stream_id, user_id, track_type
+                            "Transceiver {}: mid={:?}, direction={:?}, current={:?}, tracks={}",
+                            idx, mid, direction, current_dir, tracks.len()
                         );
+                    }
 
-                        // Spawn handler for this track
-                        let frames = remote_frames.clone();
-                        let track_clone = track.clone();
-                        tokio::spawn(async move {
-                            handle_remote_track(track_clone, frames).await;
-                        });
+                    for track in tracks {
+                        let stream_id = track.stream_id().to_string();
+                        let track_id = track.id().to_string();
+
+                        // Skip local tracks and tracks we're already handling
+                        if stream_id.starts_with("stream-local") || track_id.is_empty() {
+                            continue;
+                        }
+
+                        // Parse user ID and track type from stream ID
+                        if let Some((user_id, track_type)) = parse_stream_id(&stream_id) {
+                            // Check if we already started handling this track (globally across all renegotiations)
+                            let already_handled = handled_tracks.read().await.contains(&(user_id, track_type));
+
+                            if !already_handled {
+                                // Mark as handled BEFORE spawning to prevent race conditions
+                                handled_tracks.write().await.insert((user_id, track_type));
+
+                                tracing::info!(
+                                    "Found new remote track via transceiver polling (attempt {}): {} from stream {} (user: {}, type: {:?})",
+                                    attempts + 1, track_id, stream_id, user_id, track_type
+                                );
+
+                                // Spawn handler for this track
+                                let frames = remote_frames.clone();
+                                let track_clone = track.clone();
+                                tokio::spawn(async move {
+                                    handle_remote_track(track_clone, frames).await;
+                                });
+                                new_tracks_found += 1;
+                            }
+                        }
                     }
                 }
+
+                // If we found tracks on this attempt and we've waited at least a bit, we're done
+                if new_tracks_found > 0 && attempts > 0 {
+                    tracing::info!("Found {} new tracks after {} attempts", new_tracks_found, attempts + 1);
+                    break;
+                }
+
+                attempts += 1;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
-        }
+
+            if attempts >= max_attempts && new_tracks_found == 0 {
+                tracing::warn!("No new tracks found after {} attempts", max_attempts);
+            }
+        });
 
         tracing::info!("SFU renegotiation processed, answer created");
         Ok(Some(answer.sdp))
@@ -639,6 +690,7 @@ impl SfuClient {
         *self.channel_id.write().await = None;
         *self.ice_candidate_tx.write().await = None;
         self.remote_frames.write().await.clear();
+        self.handled_tracks.write().await.clear();
 
         // Clean up webcam encoder
         if let Ok(mut encoder) = self.encoder.lock() {
@@ -727,7 +779,10 @@ async fn handle_remote_track(
                 // Decode H.264 packet to frame using GStreamer hardware decoder
                 match decoder.decode(&rtp_bytes) {
                     Ok(Some(frame)) => {
-                        tracing::info!("Decoded {:?} frame for user {}: {}x{}", track_type, user_id, frame.width, frame.height);
+                        // Only log every 100th decoded frame to reduce spam
+                        if packet_count % 100 == 1 {
+                            tracing::info!("Decoded {:?} frame for user {}: {}x{}", track_type, user_id, frame.width, frame.height);
+                        }
                         let remote_frame = RemoteVideoFrame {
                             user_id,
                             track_type,
