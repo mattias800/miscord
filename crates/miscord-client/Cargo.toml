@@ -70,6 +70,9 @@ futures = "0.3"
 # Settings persistence
 dirs = "5"
 
+# Open URLs in browser
+open = "5"
+
 # Screen capture - xcap has compilation issues, using GStreamer instead
 # xcap = "0.0.14"
 

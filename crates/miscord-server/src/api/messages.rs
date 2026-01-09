@@ -18,7 +18,7 @@ pub struct ListMessagesQuery {
 
 pub async fn list_messages(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(channel_id): Path<Uuid>,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Vec<MessageData>>> {
@@ -28,7 +28,17 @@ pub async fn list_messages(
         .list_by_channel(channel_id, query.before, limit)
         .await?;
 
-    // Convert to MessageData with author names
+    // Get message IDs for batch reaction lookup
+    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+
+    // Get reactions for all messages in one query
+    let reactions_map = state
+        .message_service
+        .get_reactions_for_messages(&message_ids, auth.user_id)
+        .await
+        .unwrap_or_default();
+
+    // Convert to MessageData with author names and reactions
     let mut result = Vec::with_capacity(messages.len());
     for msg in messages {
         let author_name = state
@@ -38,6 +48,20 @@ pub async fn list_messages(
             .map(|u| u.display_name)
             .unwrap_or_else(|_| "Unknown".to_string());
 
+        // Get reactions for this message
+        let reactions = reactions_map
+            .get(&msg.id)
+            .map(|r| {
+                r.iter()
+                    .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                        emoji: emoji.clone(),
+                        count: *count,
+                        reacted_by_me: *reacted_by_me,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         result.push(MessageData {
             id: msg.id,
             channel_id: msg.channel_id,
@@ -46,6 +70,7 @@ pub async fn list_messages(
             content: msg.content,
             edited_at: msg.edited_at,
             reply_to_id: msg.reply_to_id,
+            reactions,
             created_at: msg.created_at,
         });
     }
@@ -80,6 +105,7 @@ pub async fn create_message(
         content: message.content,
         edited_at: message.edited_at,
         reply_to_id: message.reply_to_id,
+        reactions: vec![], // New messages have no reactions
         created_at: message.created_at,
     };
 
@@ -113,6 +139,22 @@ pub async fn update_message(
         .map(|u| u.display_name)
         .unwrap_or_else(|_| "Unknown".to_string());
 
+    // Get reactions for the updated message
+    let reactions = state
+        .message_service
+        .get_reactions(message.id, auth.user_id)
+        .await
+        .map(|r| {
+            r.into_iter()
+                .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                    emoji,
+                    count,
+                    reacted_by_me,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let message_data = MessageData {
         id: message.id,
         channel_id: message.channel_id,
@@ -121,6 +163,7 @@ pub async fn update_message(
         content: message.content,
         edited_at: message.edited_at,
         reply_to_id: message.reply_to_id,
+        reactions,
         created_at: message.created_at,
     };
 

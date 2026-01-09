@@ -196,6 +196,14 @@ impl WebSocketClient {
                 state.clear_user_typing(channel_id, user_id).await;
                 tracing::debug!("User {} stopped typing in channel {}", user_id, channel_id);
             }
+            ServerMessage::ReactionAdded { message_id, user_id, emoji } => {
+                state.add_reaction(message_id, user_id, &emoji).await;
+                tracing::debug!("Reaction {} added to message {} by user {}", emoji, message_id, user_id);
+            }
+            ServerMessage::ReactionRemoved { message_id, user_id, emoji } => {
+                state.remove_reaction(message_id, user_id, &emoji).await;
+                tracing::debug!("Reaction {} removed from message {} by user {}", emoji, message_id, user_id);
+            }
             ServerMessage::ChannelSubscribed { channel_id } => {
                 tracing::debug!("Subscribed to channel {}", channel_id);
             }

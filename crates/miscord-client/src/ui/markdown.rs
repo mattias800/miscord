@@ -27,6 +27,7 @@ const COLOR_CODE_BG: Color32 = Color32::from_rgb(40, 42, 54); // Dark background
 const COLOR_INLINE_CODE_BG: Color32 = Color32::from_rgb(55, 59, 65); // Slightly lighter
 const COLOR_HEADING: Color32 = Color32::from_rgb(220, 220, 220); // Light gray
 const COLOR_TEXT: Color32 = Color32::from_rgb(185, 187, 190); // Normal text
+const COLOR_LINK: Color32 = Color32::from_rgb(0, 168, 252); // Blue for links
 
 // Regex patterns compiled once
 static RE_CODE_BLOCK: LazyLock<Regex> =
@@ -40,6 +41,10 @@ static RE_ITALIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*([^*]+)\*|_([^_]+)_").unwrap());
 static RE_HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,3})\s+(.+)$").unwrap());
 static RE_LIST_ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\-\*]\s+(.+)$").unwrap());
+// URL pattern - matches http/https URLs
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"https?://[^\s<>\[\]()]+").unwrap()
+});
 
 // Syntax highlighting patterns
 static RE_COMMENT_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//.*$").unwrap());
@@ -176,6 +181,15 @@ fn render_inline_markdown(ui: &mut Ui, text: &str) {
                             .background_color(COLOR_INLINE_CODE_BG),
                     );
                 }
+                InlineSegment::Link(url) => {
+                    // Render as clickable link
+                    if ui.link(RichText::new(&url).color(COLOR_LINK)).clicked() {
+                        // Open URL in browser
+                        if let Err(e) = open::that(&url) {
+                            tracing::warn!("Failed to open URL {}: {}", url, e);
+                        }
+                    }
+                }
             }
         }
     });
@@ -187,6 +201,7 @@ enum InlineSegment {
     Bold(String),
     Italic(String),
     Code(String),
+    Link(String), // URL that should be clickable
 }
 
 /// Parse inline formatting and return segments
@@ -210,6 +225,7 @@ fn parse_inline_formatting(text: &str) -> Vec<InlineSegment> {
         Code,
         Bold,
         Italic,
+        Link,
     }
 
     let mut matches: Vec<Match> = Vec::new();
@@ -258,6 +274,17 @@ fn parse_inline_formatting(text: &str) -> Vec<InlineSegment> {
         });
     }
 
+    // Find URLs
+    for cap in RE_URL.captures_iter(&remaining) {
+        let full = cap.get(0).unwrap();
+        matches.push(Match {
+            start: full.start(),
+            end: full.end(),
+            content: full.as_str().to_string(),
+            kind: MatchKind::Link,
+        });
+    }
+
     // Sort by start position
     matches.sort_by_key(|m| m.start);
 
@@ -281,6 +308,7 @@ fn parse_inline_formatting(text: &str) -> Vec<InlineSegment> {
             MatchKind::Code => segments.push(InlineSegment::Code(m.content)),
             MatchKind::Bold => segments.push(InlineSegment::Bold(m.content)),
             MatchKind::Italic => segments.push(InlineSegment::Italic(m.content)),
+            MatchKind::Link => segments.push(InlineSegment::Link(m.content)),
         }
         pos = m.end;
     }

@@ -182,4 +182,65 @@ impl MessageService {
 
         Ok(attachments)
     }
+
+    /// Get reaction counts for a message
+    pub async fn get_reactions(&self, message_id: Uuid, user_id: Uuid) -> Result<Vec<(String, i64, bool)>> {
+        // Get all reactions grouped by emoji with count
+        let reactions = sqlx::query!(
+            r#"
+            SELECT
+                emoji,
+                COUNT(*) as count,
+                BOOL_OR(user_id = $2) as reacted_by_me
+            FROM message_reactions
+            WHERE message_id = $1
+            GROUP BY emoji
+            ORDER BY emoji
+            "#,
+            message_id,
+            user_id
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(reactions
+            .into_iter()
+            .map(|r| (r.emoji, r.count.unwrap_or(0), r.reacted_by_me.unwrap_or(false)))
+            .collect())
+    }
+
+    /// Get reactions for multiple messages at once (more efficient)
+    pub async fn get_reactions_for_messages(&self, message_ids: &[Uuid], user_id: Uuid) -> Result<std::collections::HashMap<Uuid, Vec<(String, i64, bool)>>> {
+        if message_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let reactions = sqlx::query!(
+            r#"
+            SELECT
+                message_id,
+                emoji,
+                COUNT(*) as count,
+                BOOL_OR(user_id = $2) as reacted_by_me
+            FROM message_reactions
+            WHERE message_id = ANY($1)
+            GROUP BY message_id, emoji
+            ORDER BY message_id, emoji
+            "#,
+            message_ids,
+            user_id
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut result: std::collections::HashMap<Uuid, Vec<(String, i64, bool)>> = std::collections::HashMap::new();
+        for r in reactions {
+            result
+                .entry(r.message_id)
+                .or_default()
+                .push((r.emoji, r.count.unwrap_or(0), r.reacted_by_me.unwrap_or(false)));
+        }
+
+        Ok(result)
+    }
 }

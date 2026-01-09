@@ -65,6 +65,8 @@ pub struct MessageData {
     pub content: String,
     pub edited_at: Option<DateTime<Utc>>,
     pub reply_to_id: Option<Uuid>,
+    #[serde(default)]
+    pub reactions: Vec<ReactionData>,
     pub created_at: DateTime<Utc>,
 }
 

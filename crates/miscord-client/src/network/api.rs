@@ -127,6 +127,25 @@ pub async fn patch_empty<B: Serialize>(
     Ok(())
 }
 
+pub async fn put_empty(url: &str, token: Option<&str>) -> Result<()> {
+    let client = reqwest::Client::new();
+    let mut request = client.put(url);
+
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request.send().await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Request failed with status {}: {}", status, text);
+    }
+
+    Ok(())
+}
+
 pub async fn delete(url: &str, token: Option<&str>) -> Result<()> {
     let client = reqwest::Client::new();
     let mut request = client.delete(url);

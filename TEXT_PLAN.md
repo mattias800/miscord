@@ -185,18 +185,20 @@ Lower priority enhancements:
 
 ### Files to Modify (Text/DM Focus)
 
-**Client-side:**
-- `src/Miscord.Client/Views/MainAppView.axaml` - Channel chat UI
-- `src/Miscord.Client/Views/DirectMessagesView.axaml` - DM chat UI
-- `src/Miscord.Client/ViewModels/MainAppViewModel.cs` - Channel logic
-- `src/Miscord.Client/ViewModels/DirectMessagesViewModel.cs` - DM logic
-- `src/Miscord.Client/Converters/` - New converters for timestamps, etc.
+**Client-side (Rust/egui):**
+- `crates/miscord-client/src/ui/chat.rs` - Channel chat UI (date separators, timestamps, replies, reactions, typing)
+- `crates/miscord-client/src/ui/markdown.rs` - Markdown rendering for messages
+- `crates/miscord-client/src/state/app_state.rs` - State management (reactions, typing users)
+- `crates/miscord-client/src/network/websocket.rs` - WebSocket message handling
 
-**Server-side (for features requiring backend):**
-- `src/Miscord.Server/Services/MessageService.cs`
-- `src/Miscord.Server/Services/DirectMessageService.cs`
-- `src/Miscord.Server/Hubs/MiscordHub.cs` - SignalR events
-- `src/Miscord.Shared/Models/` - New models for reactions, etc.
+**Server-side (Rust/Axum):**
+- `crates/miscord-server/src/services/message.rs` - Message service (reactions)
+- `crates/miscord-server/src/api/messages.rs` - Message API endpoints
+- `crates/miscord-server/src/ws/handler.rs` - WebSocket handler (typing, reactions broadcasts)
+
+**Shared protocol:**
+- `crates/miscord-protocol/src/types.rs` - Data types (MessageData, ReactionData)
+- `crates/miscord-protocol/src/messages.rs` - WebSocket message types
 
 ### Coordination with Other Agents
 
@@ -211,26 +213,26 @@ Another agent is currently working on server, community, and user account manage
 
 ## Progress Tracking
 
-### Completed
-- [ ] Initial plan created
-- [ ] Phase 1: Quick Wins
-  - [ ] Date separators (shows "Today", "Yesterday", or full date)
-  - [ ] Selected conversation highlight (DMs show selected state)
-  - [ ] Relative timestamps with full timestamp tooltip
-  - [ ] Message formatting toolbar (Bold, Italic, Code buttons)
-- [ ] Phase 2: High Impact Features
-  - [ ] Typing indicators (shows "User is typing..." with throttling)
-  - [ ] Unread indicators for text channels (badge on channel list)
-  - [ ] Message replies/threading (reply button, preview in messages)
-  - [ ] Link previews (OpenGraph metadata, YouTube embeds)
-  - [ ] User mentions (autocomplete dropdown, partial match filter, highlight in messages)
-  - [ ] Smart auto-scroll (preserve position when reading old messages)
+### Completed (Rust/egui implementation)
+- [x] Initial plan created
+- [x] Phase 1: Quick Wins
+  - [x] Date separators (shows "Today", "Yesterday", or full date between messages from different days)
+  - [ ] Selected conversation highlight (DMs show selected state) - Not yet implemented
+  - [x] Relative timestamps with full timestamp tooltip ("Just now", "2m ago", etc.)
+  - [ ] Message formatting toolbar (Bold, Italic, Code buttons) - Not yet implemented
+- [x] Phase 2: High Impact Features (partial)
+  - [x] Typing indicators (shows "User is typing..." via WebSocket events)
+  - [ ] Unread indicators for text channels - Not yet implemented
+  - [x] Message replies/threading (shows quoted preview with ┌─ @author)
+  - [ ] Link previews - Not yet implemented
+  - [ ] User mentions (@username) - Not yet implemented
+  - [ ] Smart auto-scroll - Uses egui's stick_to_bottom
 
 ### In Progress
 - [ ] Phase 3: Medium Impact Features
-  - [ ] Message reactions (emoji picker, counts, tooltips, real-time sync)
-  - [ ] File attachments (upload, drag-drop, image lightbox, audio player with seek/volume)
-  - [ ] Pinned messages (pin/unpin, pinned button in header, popup panel)
+  - [x] Message reactions display (shows emoji with counts, real-time sync via WebSocket)
+  - [ ] File attachments - Not yet implemented
+  - [ ] Pinned messages - Not yet implemented
 
 ### Not Started
 - [ ] Phase 4: Nice to Have

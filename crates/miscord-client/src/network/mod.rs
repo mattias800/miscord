@@ -109,6 +109,20 @@ impl NetworkClient {
         }
     }
 
+    /// Send typing indicator to a channel
+    pub async fn start_typing(&self, channel_id: Uuid) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.start_typing(channel_id).await;
+        }
+    }
+
+    /// Stop typing indicator
+    pub async fn stop_typing(&self, channel_id: Uuid) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.stop_typing(channel_id).await;
+        }
+    }
+
     // Communities
 
     pub async fn load_communities(&self) -> Result<()> {
@@ -257,6 +271,30 @@ impl NetworkClient {
             &CreateMessage {
                 content: content.to_string(),
             },
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Add a reaction to a message
+    pub async fn add_reaction(&self, message_id: Uuid, emoji: &str) -> Result<()> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::post_empty_void(
+            &format!("{}/api/messages/{}/reactions/{}", server_url, message_id, emoji),
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Remove a reaction from a message
+    pub async fn remove_reaction(&self, message_id: Uuid, emoji: &str) -> Result<()> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::delete(
+            &format!("{}/api/messages/{}/reactions/{}", server_url, message_id, emoji),
             token.as_deref(),
         )
         .await

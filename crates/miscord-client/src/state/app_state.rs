@@ -28,6 +28,9 @@ pub struct AppStateInner {
     // Messages (channel_id -> messages)
     pub messages: HashMap<Uuid, Vec<MessageData>>,
 
+    // Message reactions (message_id -> emoji -> list of user_ids who reacted)
+    pub message_reactions: HashMap<Uuid, HashMap<String, Vec<Uuid>>>,
+
     // Users
     pub users: HashMap<Uuid, UserData>,
 
@@ -90,6 +93,7 @@ impl Default for AppStateInner {
             channels: HashMap::new(),
             current_channel_id: None,
             messages: HashMap::new(),
+            message_reactions: HashMap::new(),
             users: HashMap::new(),
             members: HashMap::new(),
             typing_users: HashMap::new(),
@@ -314,6 +318,42 @@ impl AppState {
     pub async fn remove_voice_participant(&self, user_id: Uuid) {
         let mut state = self.inner.write().await;
         state.voice_participants.remove(&user_id);
+    }
+
+    // Reaction methods
+    pub async fn add_reaction(&self, message_id: Uuid, user_id: Uuid, emoji: &str) {
+        let mut state = self.inner.write().await;
+        state
+            .message_reactions
+            .entry(message_id)
+            .or_default()
+            .entry(emoji.to_string())
+            .or_default()
+            .push(user_id);
+    }
+
+    pub async fn remove_reaction(&self, message_id: Uuid, user_id: Uuid, emoji: &str) {
+        let mut state = self.inner.write().await;
+        if let Some(emoji_reactions) = state.message_reactions.get_mut(&message_id) {
+            if let Some(users) = emoji_reactions.get_mut(emoji) {
+                users.retain(|&uid| uid != user_id);
+                if users.is_empty() {
+                    emoji_reactions.remove(emoji);
+                }
+            }
+            if emoji_reactions.is_empty() {
+                state.message_reactions.remove(&message_id);
+            }
+        }
+    }
+
+    pub async fn get_reactions(&self, message_id: Uuid) -> HashMap<String, Vec<Uuid>> {
+        let state = self.inner.read().await;
+        state
+            .message_reactions
+            .get(&message_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     // Typing indicator methods
