@@ -33,6 +33,8 @@ pub struct ChatView {
     mention_query: String,
     /// Selected mention index in dropdown
     mention_selected: usize,
+    /// Cursor position to set after mention insertion (char index)
+    pending_cursor_pos: Option<usize>,
 }
 
 /// Get date separator text for a message
@@ -70,6 +72,7 @@ impl ChatView {
             mention_active: false,
             mention_query: String::new(),
             mention_selected: 0,
+            pending_cursor_pos: None,
         }
     }
 
@@ -360,6 +363,7 @@ impl ChatView {
                 }
 
                 // Message input
+                let text_edit_id = ui.make_persistent_id("chat_message_input");
                 ui.horizontal(|ui| {
                     let hint_text = if self.editing_message.is_some() {
                         "Edit message (Shift+Enter for new line)".to_string()
@@ -369,11 +373,21 @@ impl ChatView {
 
                     let response = ui.add(
                         egui::TextEdit::multiline(&mut self.message_input)
+                            .id(text_edit_id)
                             .hint_text(hint_text)
                             .desired_width(ui.available_width() - 60.0)
                             .desired_rows(2)
                             .lock_focus(true),
                     );
+
+                    // Apply pending cursor position after mention insertion
+                    if let Some(cursor_pos) = self.pending_cursor_pos.take() {
+                        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), text_edit_id) {
+                            let ccursor = egui::text::CCursor::new(cursor_pos);
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
+                            state.store(ui.ctx(), text_edit_id);
+                        }
+                    }
 
                     // Handle Enter (send) vs Shift+Enter (new line)
                     // Only if mention autocomplete didn't handle it
@@ -667,7 +681,10 @@ impl ChatView {
         if let Some(at_pos) = self.message_input.rfind('@') {
             // Replace @query with @username
             self.message_input.truncate(at_pos);
-            self.message_input.push_str(&format!("@{} ", username));
+            let mention = format!("@{} ", username);
+            self.message_input.push_str(&mention);
+            // Set cursor to end of the inserted mention
+            self.pending_cursor_pos = Some(self.message_input.chars().count());
         }
         self.mention_active = false;
         self.mention_query.clear();
