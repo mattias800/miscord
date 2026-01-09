@@ -35,6 +35,8 @@ pub struct ChatView {
     mention_selected: usize,
     /// Cursor position to set after mention insertion (char index)
     pending_cursor_pos: Option<usize>,
+    /// Whether mention was dismissed with Escape (prevents immediate re-open)
+    mention_dismissed: bool,
 }
 
 /// Get date separator text for a message
@@ -73,6 +75,7 @@ impl ChatView {
             mention_query: String::new(),
             mention_selected: 0,
             pending_cursor_pos: None,
+            mention_dismissed: false,
         }
     }
 
@@ -334,6 +337,7 @@ impl ChatView {
                 // Handle mention keyboard navigation BEFORE text input
                 // This way we can intercept the keys
                 let mut mention_handled = false;
+                let mut refocus_input = false;
                 if self.mention_active && !matching_members.is_empty() {
                     let up = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
                     let down = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
@@ -356,15 +360,16 @@ impl ChatView {
                     }
                     if escape {
                         self.mention_active = false;
-                        self.mention_query.clear();
+                        self.mention_dismissed = true;  // Prevent immediate re-open
                         self.mention_selected = 0;
                         mention_handled = true;
+                        refocus_input = true;  // Re-focus the text input after closing dropdown
                     }
                 }
 
                 // Message input
                 let text_edit_id = ui.make_persistent_id("chat_message_input");
-                ui.horizontal(|ui| {
+                let input_row_response = ui.horizontal(|ui| {
                     let hint_text = if self.editing_message.is_some() {
                         "Edit message (Shift+Enter for new line)".to_string()
                     } else {
@@ -409,18 +414,21 @@ impl ChatView {
                     }
                 });
 
+                // Re-focus text input after closing mention dropdown with Escape
+                if refocus_input {
+                    ui.memory_mut(|mem| mem.request_focus(text_edit_id));
+                }
+
                 // Show mention autocomplete dropdown as floating popup above the input
                 if self.mention_active && !matching_members.is_empty() {
-                    // Calculate position - above the input panel
-                    let input_rect = ui.min_rect();
-                    let dropdown_height = (matching_members.len() as f32 * 32.0) + 8.0;
-                    let dropdown_pos = egui::pos2(
-                        input_rect.left() + 8.0,
-                        input_rect.top() - dropdown_height - 4.0,
-                    );
+                    // Use the horizontal row's rect for positioning (screen coordinates)
+                    let input_rect = input_row_response.response.rect;
+                    // Position at top of input, with bottom-left anchor so dropdown sits above
+                    let dropdown_pos = egui::pos2(input_rect.left(), input_rect.top());
 
                     egui::Area::new(egui::Id::new("mention_dropdown"))
                         .order(egui::Order::Foreground)
+                        .pivot(egui::Align2::LEFT_BOTTOM)  // Anchor at bottom-left
                         .fixed_pos(dropdown_pos)
                         .show(ui.ctx(), |ui| {
                             egui::Frame::none()
@@ -680,20 +688,29 @@ impl ChatView {
                 self.mention_active = false;
                 self.mention_query.clear();
                 self.mention_selected = 0;
+                self.mention_dismissed = false;  // Reset dismissed when mention is completed
             } else {
                 // Active mention - extract query
                 let new_query = after_at.to_string();
                 // Only reset selection when query actually changes
                 if new_query != self.mention_query {
                     self.mention_selected = 0;
+                    // If query changed, user typed something new - clear dismissed state
+                    if self.mention_dismissed {
+                        self.mention_dismissed = false;
+                    }
                 }
-                self.mention_active = true;
+                // Only activate if not dismissed
+                if !self.mention_dismissed {
+                    self.mention_active = true;
+                }
                 self.mention_query = new_query;
             }
         } else {
             self.mention_active = false;
             self.mention_query.clear();
             self.mention_selected = 0;
+            self.mention_dismissed = false;  // Reset dismissed when @ is removed
         }
     }
 
