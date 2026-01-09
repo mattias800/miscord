@@ -45,6 +45,11 @@ static RE_LIST_ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\-\*]\s+(
 static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"https?://[^\s<>\[\]()]+").unwrap()
 });
+// Mention pattern - matches @username
+static RE_MENTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"@(\w+)").unwrap()
+});
+const COLOR_MENTION: Color32 = Color32::from_rgb(88, 101, 242); // Discord blurple
 
 // Syntax highlighting patterns
 static RE_COMMENT_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//.*$").unwrap());
@@ -199,6 +204,15 @@ fn render_inline_markdown(ui: &mut Ui, text: &str) {
                         }
                     }
                 }
+                InlineSegment::Mention(username) => {
+                    // Render mention with highlight background
+                    ui.label(
+                        RichText::new(format!("@{}", username))
+                            .color(COLOR_MENTION)
+                            .strong()
+                            .background_color(Color32::from_rgb(88, 101, 242).gamma_multiply(0.3)),
+                    );
+                }
             }
         }
     });
@@ -210,7 +224,8 @@ enum InlineSegment {
     Bold(String),
     Italic(String),
     Code(String),
-    Link(String), // URL that should be clickable
+    Link(String),    // URL that should be clickable
+    Mention(String), // @username mention
 }
 
 /// Parse inline formatting and return segments
@@ -235,6 +250,7 @@ fn parse_inline_formatting(text: &str) -> Vec<InlineSegment> {
         Bold,
         Italic,
         Link,
+        Mention,
     }
 
     let mut matches: Vec<Match> = Vec::new();
@@ -294,6 +310,18 @@ fn parse_inline_formatting(text: &str) -> Vec<InlineSegment> {
         });
     }
 
+    // Find mentions
+    for cap in RE_MENTION.captures_iter(&remaining) {
+        let full = cap.get(0).unwrap();
+        let username = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        matches.push(Match {
+            start: full.start(),
+            end: full.end(),
+            content: username.to_string(),
+            kind: MatchKind::Mention,
+        });
+    }
+
     // Sort by start position
     matches.sort_by_key(|m| m.start);
 
@@ -318,6 +346,7 @@ fn parse_inline_formatting(text: &str) -> Vec<InlineSegment> {
             MatchKind::Bold => segments.push(InlineSegment::Bold(m.content)),
             MatchKind::Italic => segments.push(InlineSegment::Italic(m.content)),
             MatchKind::Link => segments.push(InlineSegment::Link(m.content)),
+            MatchKind::Mention => segments.push(InlineSegment::Mention(m.content)),
         }
         pos = m.end;
     }

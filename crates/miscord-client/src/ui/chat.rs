@@ -27,6 +27,12 @@ pub struct ChatView {
     editing_message: Option<MessageData>,
     /// Shared message renderer state
     renderer_state: MessageRendererState,
+    /// Whether mention autocomplete is active
+    mention_active: bool,
+    /// Current mention search query
+    mention_query: String,
+    /// Selected mention index in dropdown
+    mention_selected: usize,
 }
 
 /// Get date separator text for a message
@@ -61,6 +67,9 @@ impl ChatView {
             replying_to: None,
             editing_message: None,
             renderer_state: MessageRendererState::new(),
+            mention_active: false,
+            mention_query: String::new(),
+            mention_selected: 0,
         }
     }
 
@@ -71,7 +80,7 @@ impl ChatView {
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
-        let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions) = runtime.block_on(async {
+        let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members) = runtime.block_on(async {
             let s = state.read().await;
             let channel_id = s.current_channel_id;
             let messages = channel_id
@@ -81,6 +90,12 @@ impl ChatView {
             let channel_name = channel_id
                 .and_then(|id| s.channels.get(&id))
                 .map(|c| c.name.clone())
+                .unwrap_or_default();
+
+            // Get members for mention autocomplete
+            let members: Vec<(Uuid, String, String)> = s.current_community_id
+                .and_then(|cid| s.members.get(&cid))
+                .map(|m| m.iter().map(|u| (u.id, u.username.clone(), u.display_name.clone())).collect())
                 .unwrap_or_default();
 
             // Get current user ID for checking ownership and reactions
@@ -134,7 +149,7 @@ impl ChatView {
                 })
                 .collect();
 
-            (channel_id, messages, channel_name, typing_usernames, current_user_id, message_reactions)
+            (channel_id, messages, channel_name, typing_usernames, current_user_id, message_reactions, members)
         });
 
         if current_channel.is_none() {
@@ -234,6 +249,65 @@ impl ChatView {
                     self.message_input.clear();
                 }
 
+                // Formatting toolbar
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+
+                    // Bold button
+                    if ui.add(
+                        egui::Button::new(egui::RichText::new("B").strong().size(13.0))
+                            .min_size(egui::vec2(28.0, 24.0))
+                    ).on_hover_text("Bold (Ctrl+B)").clicked() {
+                        self.insert_formatting("**", "**");
+                    }
+
+                    // Italic button
+                    if ui.add(
+                        egui::Button::new(egui::RichText::new("I").italics().size(13.0))
+                            .min_size(egui::vec2(28.0, 24.0))
+                    ).on_hover_text("Italic (Ctrl+I)").clicked() {
+                        self.insert_formatting("*", "*");
+                    }
+
+                    // Strikethrough button
+                    if ui.add(
+                        egui::Button::new(egui::RichText::new("S").strikethrough().size(13.0))
+                            .min_size(egui::vec2(28.0, 24.0))
+                    ).on_hover_text("Strikethrough").clicked() {
+                        self.insert_formatting("~~", "~~");
+                    }
+
+                    ui.separator();
+
+                    // Inline code button
+                    if ui.add(
+                        egui::Button::new(egui::RichText::new("</>").monospace().size(12.0))
+                            .min_size(egui::vec2(32.0, 24.0))
+                    ).on_hover_text("Inline code").clicked() {
+                        self.insert_formatting("`", "`");
+                    }
+
+                    // Code block button
+                    if ui.add(
+                        egui::Button::new(egui::RichText::new("```").monospace().size(11.0))
+                            .min_size(egui::vec2(36.0, 24.0))
+                    ).on_hover_text("Code block").clicked() {
+                        self.insert_formatting("```\n", "\n```");
+                    }
+
+                    ui.separator();
+
+                    // Link button
+                    if ui.add(
+                        egui::Button::new(egui::RichText::new("🔗").size(13.0))
+                            .min_size(egui::vec2(28.0, 24.0))
+                    ).on_hover_text("Insert link [text](url)").clicked() {
+                        self.insert_formatting("[", "](url)");
+                    }
+                });
+
+                ui.add_space(4.0);
+
                 // Message input
                 ui.horizontal(|ui| {
                     let hint_text = if self.editing_message.is_some() {
@@ -268,6 +342,77 @@ impl ChatView {
                         self.send_message(channel_id, state, network, runtime);
                     }
                 });
+
+                // Mention autocomplete detection
+                self.update_mention_state();
+
+                // Show mention autocomplete dropdown
+                if self.mention_active && !members.is_empty() {
+                    let query_lower = self.mention_query.to_lowercase();
+                    let matching_members: Vec<_> = members
+                        .iter()
+                        .filter(|(_, username, display_name)| {
+                            username.to_lowercase().contains(&query_lower)
+                                || display_name.to_lowercase().contains(&query_lower)
+                        })
+                        .take(5)
+                        .collect();
+
+                    if !matching_members.is_empty() {
+                        egui::Frame::none()
+                            .fill(super::theme::BG_ELEVATED)
+                            .rounding(4.0)
+                            .inner_margin(4.0)
+                            .show(ui, |ui| {
+                                for (i, (_, username, display_name)) in matching_members.iter().enumerate() {
+                                    let is_selected = i == self.mention_selected;
+                                    let text = if username != display_name {
+                                        format!("{} ({})", display_name, username)
+                                    } else {
+                                        display_name.clone()
+                                    };
+
+                                    let response = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(&text)
+                                                .color(if is_selected {
+                                                    super::theme::TEXT_BRIGHT
+                                                } else {
+                                                    super::theme::TEXT_NORMAL
+                                                })
+                                        )
+                                        .fill(if is_selected {
+                                            super::theme::BG_ACCENT
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        })
+                                        .min_size(egui::vec2(ui.available_width(), 28.0))
+                                    );
+
+                                    if response.clicked() {
+                                        self.insert_mention(username);
+                                    }
+                                }
+                            });
+
+                        // Handle keyboard navigation
+                        let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                        let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+                        let tab = ui.input(|i| i.key_pressed(egui::Key::Tab));
+
+                        if up && self.mention_selected > 0 {
+                            self.mention_selected -= 1;
+                        }
+                        if down && self.mention_selected < matching_members.len().saturating_sub(1) {
+                            self.mention_selected += 1;
+                        }
+                        if tab && !matching_members.is_empty() {
+                            let (_, username, _) = matching_members[self.mention_selected];
+                            self.insert_mention(username);
+                        }
+                    }
+                }
+
                 ui.add_space(4.0);
 
                 // Send typing indicator when user is typing
@@ -450,6 +595,61 @@ impl ChatView {
                 let _ = network.send_message_with_reply(channel_id, &content, reply_to_id).await;
             });
         }
+    }
+
+    /// Insert formatting markers around cursor position or at end
+    fn insert_formatting(&mut self, prefix: &str, suffix: &str) {
+        // For simplicity, just append at end since egui doesn't give us cursor position easily
+        // A more sophisticated implementation would track cursor position
+        if self.message_input.is_empty() {
+            self.message_input = format!("{}{}", prefix, suffix);
+        } else {
+            // Add a space if the last char isn't whitespace
+            if !self.message_input.ends_with(' ') && !self.message_input.ends_with('\n') {
+                self.message_input.push(' ');
+            }
+            self.message_input.push_str(prefix);
+            self.message_input.push_str(suffix);
+        }
+    }
+
+    /// Update mention autocomplete state based on input
+    fn update_mention_state(&mut self) {
+        // Find the last @ in the input
+        if let Some(at_pos) = self.message_input.rfind('@') {
+            let after_at = &self.message_input[at_pos + 1..];
+
+            // Check if there's a space after @ (mention complete) or no @ at all
+            if after_at.contains(' ') || after_at.contains('\n') {
+                self.mention_active = false;
+                self.mention_query.clear();
+                self.mention_selected = 0;
+            } else {
+                // Active mention - extract query
+                self.mention_active = true;
+                self.mention_query = after_at.to_string();
+                // Reset selection when query changes
+                if self.mention_selected > 0 {
+                    self.mention_selected = 0;
+                }
+            }
+        } else {
+            self.mention_active = false;
+            self.mention_query.clear();
+            self.mention_selected = 0;
+        }
+    }
+
+    /// Insert a mention by replacing the @query with @username
+    fn insert_mention(&mut self, username: &str) {
+        if let Some(at_pos) = self.message_input.rfind('@') {
+            // Replace @query with @username
+            self.message_input.truncate(at_pos);
+            self.message_input.push_str(&format!("@{} ", username));
+        }
+        self.mention_active = false;
+        self.mention_query.clear();
+        self.mention_selected = 0;
     }
 }
 

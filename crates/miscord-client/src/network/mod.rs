@@ -540,6 +540,18 @@ impl NetworkClient {
             client.unsubscribe_screen_track(user_id).await;
         }
     }
+
+    /// Fetch OpenGraph metadata for a URL
+    pub async fn fetch_opengraph(&self, url: &str) -> Result<OpenGraphData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::get(
+            &format!("{}/api/opengraph?url={}", server_url, urlencoding::encode(url)),
+            token.as_deref(),
+        )
+        .await
+    }
 }
 
 /// ICE server configuration for WebRTC
@@ -548,4 +560,14 @@ pub struct IceServerConfig {
     pub urls: Vec<String>,
     pub username: Option<String>,
     pub credential: Option<String>,
+}
+
+/// OpenGraph metadata for link previews
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct OpenGraphData {
+    pub url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    pub site_name: Option<String>,
 }

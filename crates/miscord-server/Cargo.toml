@@ -59,6 +59,10 @@ tracing-subscriber = { workspace = true }
 config = { workspace = true }
 rand = { workspace = true }
 
+# HTTP client for OpenGraph fetching
+reqwest = { version = "0.12", features = ["json"] }
+regex = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json"] }

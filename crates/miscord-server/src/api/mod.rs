@@ -2,6 +2,7 @@ mod auth;
 mod channels;
 mod communities;
 mod messages;
+mod opengraph;
 mod users;
 
 use crate::state::AppState;
@@ -84,6 +85,8 @@ pub fn create_router(state: AppState) -> Router {
         // Channel read state routes
         .route("/api/channels/{id}/read", post(channels::mark_channel_read))
         .route("/api/channels/{id}/unread", get(channels::get_unread_count))
+        // OpenGraph metadata endpoint
+        .route("/api/opengraph", get(opengraph::fetch_opengraph))
         // WebSocket endpoint
         .route("/ws", get(ws::handler::ws_handler))
         .layer(TraceLayer::new_for_http())
