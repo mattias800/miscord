@@ -300,7 +300,7 @@ pub fn render_message(
             } else {
                 // Fall back to message.reactions (initial load)
                 for reaction in &message.reactions {
-                    let reaction_text = format!("{} {}", reaction.emoji, reaction.count);
+                    let reaction_text = format!("{} {}", reaction.emoji, reaction.count());
                     let fill_color = if reaction.reacted_by_me {
                         egui::Color32::from_rgb(88, 101, 242)
                     } else {

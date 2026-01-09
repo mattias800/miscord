@@ -53,9 +53,9 @@ pub async fn list_messages(
             .get(&msg.id)
             .map(|r| {
                 r.iter()
-                    .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                    .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
                         emoji: emoji.clone(),
-                        count: *count,
+                        user_ids: user_ids.clone(),
                         reacted_by_me: *reacted_by_me,
                     })
                     .collect()
@@ -152,9 +152,9 @@ pub async fn update_message(
         .await
         .map(|r| {
             r.into_iter()
-                .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
                     emoji,
-                    count,
+                    user_ids,
                     reacted_by_me,
                 })
                 .collect()
@@ -310,9 +310,9 @@ pub async fn get_thread(
         .get(&parent.id)
         .map(|r| {
             r.iter()
-                .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
                     emoji: emoji.clone(),
-                    count: *count,
+                    user_ids: user_ids.clone(),
                     reacted_by_me: *reacted_by_me,
                 })
                 .collect()
@@ -348,9 +348,9 @@ pub async fn get_thread(
             .get(&msg.id)
             .map(|r| {
                 r.iter()
-                    .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                    .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
                         emoji: emoji.clone(),
-                        count: *count,
+                        user_ids: user_ids.clone(),
                         reacted_by_me: *reacted_by_me,
                     })
                     .collect()

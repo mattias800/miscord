@@ -93,11 +93,11 @@ impl ChatView {
                     let reactions = s.message_reactions.get(&msg.id)?;
                     let mut counts: Vec<ReactionInfo> = reactions
                         .iter()
-                        .map(|(emoji, users)| {
+                        .map(|(emoji, reaction_state)| {
                             let i_reacted = current_user_id
-                                .map(|uid| users.contains(&uid))
+                                .map(|uid| reaction_state.has_user(uid))
                                 .unwrap_or(false);
-                            (emoji.clone(), users.len(), i_reacted)
+                            (emoji.clone(), reaction_state.count(), i_reacted)
                         })
                         .collect();
                     // Sort by emoji for stable ordering
@@ -310,7 +310,9 @@ impl ChatView {
 
                         let mut prev_message: Option<&MessageData> = None;
 
-                        for message in messages.iter() {
+                        // Messages come from server in DESC order (newest first)
+                        // Reverse to show oldest first (newest at bottom)
+                        for message in messages.iter().rev() {
                             // Show date separator if this is the first message or date changed
                             let show_separator = prev_message
                                 .map(|prev| is_different_date(prev, message))

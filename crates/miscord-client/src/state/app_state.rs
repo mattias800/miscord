@@ -7,6 +7,26 @@ use uuid::Uuid;
 
 use miscord_protocol::{ChannelData, CommunityData, MessageData, UserData};
 
+/// Tracks reaction state for a single emoji on a message.
+/// Contains the set of user IDs who reacted with this emoji.
+#[derive(Debug, Clone, Default)]
+pub struct ReactionState {
+    /// Users who reacted with this emoji
+    pub user_ids: HashSet<Uuid>,
+}
+
+impl ReactionState {
+    /// Total number of users who reacted
+    pub fn count(&self) -> usize {
+        self.user_ids.len()
+    }
+
+    /// Check if a specific user has reacted
+    pub fn has_user(&self, user_id: Uuid) -> bool {
+        self.user_ids.contains(&user_id)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppStateInner>>,
@@ -29,8 +49,8 @@ pub struct AppStateInner {
     // Messages (channel_id -> messages)
     pub messages: HashMap<Uuid, Vec<MessageData>>,
 
-    // Message reactions (message_id -> emoji -> list of user_ids who reacted)
-    pub message_reactions: HashMap<Uuid, HashMap<String, Vec<Uuid>>>,
+    // Message reactions (message_id -> emoji -> reaction state)
+    pub message_reactions: HashMap<Uuid, HashMap<String, ReactionState>>,
 
     // Users
     pub users: HashMap<Uuid, UserData>,
@@ -330,24 +350,25 @@ impl AppState {
     // Reaction methods
     pub async fn add_reaction(&self, message_id: Uuid, user_id: Uuid, emoji: &str) {
         let mut state = self.inner.write().await;
-        let users = state
+        let reaction_state = state
             .message_reactions
             .entry(message_id)
             .or_default()
             .entry(emoji.to_string())
             .or_default();
-        // Avoid duplicates
-        if !users.contains(&user_id) {
-            users.push(user_id);
-        }
+
+        // Add user to the set (HashSet handles duplicates automatically)
+        reaction_state.user_ids.insert(user_id);
     }
 
     pub async fn remove_reaction(&self, message_id: Uuid, user_id: Uuid, emoji: &str) {
         let mut state = self.inner.write().await;
         if let Some(emoji_reactions) = state.message_reactions.get_mut(&message_id) {
-            if let Some(users) = emoji_reactions.get_mut(emoji) {
-                users.retain(|&uid| uid != user_id);
-                if users.is_empty() {
+            if let Some(reaction_state) = emoji_reactions.get_mut(emoji) {
+                reaction_state.user_ids.remove(&user_id);
+
+                // Clean up if no reactions left
+                if reaction_state.count() == 0 {
                     emoji_reactions.remove(emoji);
                 }
             }
@@ -357,7 +378,7 @@ impl AppState {
         }
     }
 
-    pub async fn get_reactions(&self, message_id: Uuid) -> HashMap<String, Vec<Uuid>> {
+    pub async fn get_reactions(&self, message_id: Uuid) -> HashMap<String, ReactionState> {
         let state = self.inner.read().await;
         state
             .message_reactions
@@ -530,14 +551,44 @@ impl AppState {
     }
 
     /// Set thread messages (when loading a thread)
+    /// Also extracts reactions from messages into message_reactions state
     pub async fn set_thread_messages(&self, parent_message_id: Uuid, messages: Vec<MessageData>) {
         let mut state = self.inner.write().await;
+
+        // Extract reactions from messages into message_reactions state
+        for msg in &messages {
+            if !msg.reactions.is_empty() {
+                let mut emoji_reactions: HashMap<String, ReactionState> = HashMap::new();
+                for reaction in &msg.reactions {
+                    let reaction_state = ReactionState {
+                        user_ids: reaction.user_ids.iter().copied().collect(),
+                    };
+                    emoji_reactions.insert(reaction.emoji.clone(), reaction_state);
+                }
+                state.message_reactions.insert(msg.id, emoji_reactions);
+            }
+        }
+
         state.thread_messages.insert(parent_message_id, messages);
     }
 
     /// Add a new thread reply (from WebSocket)
+    /// Also extracts reactions from the message into message_reactions state
     pub async fn add_thread_reply(&self, parent_message_id: Uuid, message: MessageData) {
         let mut state = self.inner.write().await;
+
+        // Extract reactions from the new message into message_reactions state
+        if !message.reactions.is_empty() {
+            let mut emoji_reactions: HashMap<String, ReactionState> = HashMap::new();
+            for reaction in &message.reactions {
+                let reaction_state = ReactionState {
+                    user_ids: reaction.user_ids.iter().copied().collect(),
+                };
+                emoji_reactions.insert(reaction.emoji.clone(), reaction_state);
+            }
+            state.message_reactions.insert(message.id, emoji_reactions);
+        }
+
         state
             .thread_messages
             .entry(parent_message_id)

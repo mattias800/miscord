@@ -142,26 +142,14 @@ impl ChannelList {
                                     // Populate message_reactions from loaded messages
                                     for msg in &messages {
                                         if !msg.reactions.is_empty() {
-                                            let mut emoji_users: std::collections::HashMap<String, Vec<uuid::Uuid>> = std::collections::HashMap::new();
+                                            let mut emoji_reactions: std::collections::HashMap<String, crate::state::ReactionState> = std::collections::HashMap::new();
                                             for reaction in &msg.reactions {
-                                                // We don't have the full list of user IDs from the API,
-                                                // just the count and whether we reacted
-                                                // For display purposes, we'll store the current user if they reacted
-                                                let mut users = Vec::new();
-                                                if reaction.reacted_by_me {
-                                                    if let Some(user) = &s.current_user {
-                                                        users.push(user.id);
-                                                    }
-                                                }
-                                                // Add placeholder users for the count (excluding self if already added)
-                                                let others_count = reaction.count as usize - users.len();
-                                                for i in 0..others_count {
-                                                    // Use deterministic fake UUIDs for consistent rendering
-                                                    users.push(uuid::Uuid::from_u128(i as u128));
-                                                }
-                                                emoji_users.insert(reaction.emoji.clone(), users);
+                                                let reaction_state = crate::state::ReactionState {
+                                                    user_ids: reaction.user_ids.iter().copied().collect(),
+                                                };
+                                                emoji_reactions.insert(reaction.emoji.clone(), reaction_state);
                                             }
-                                            s.message_reactions.insert(msg.id, emoji_users);
+                                            s.message_reactions.insert(msg.id, emoji_reactions);
                                         }
                                     }
 

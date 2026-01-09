@@ -274,62 +274,86 @@ impl MessageService {
         Ok(attachments)
     }
 
-    /// Get reaction counts for a message
-    pub async fn get_reactions(&self, message_id: Uuid, user_id: Uuid) -> Result<Vec<(String, i64, bool)>> {
-        // Get all reactions grouped by emoji with count
+    /// Get reactions for a message with user IDs
+    pub async fn get_reactions(&self, message_id: Uuid, user_id: Uuid) -> Result<Vec<(String, Vec<Uuid>, bool)>> {
+        // Get all reactions with user IDs
         let reactions = sqlx::query!(
             r#"
-            SELECT
-                emoji,
-                COUNT(*) as count,
-                BOOL_OR(user_id = $2) as reacted_by_me
+            SELECT user_id, emoji
             FROM message_reactions
             WHERE message_id = $1
-            GROUP BY emoji
-            ORDER BY emoji
+            ORDER BY emoji, created_at
             "#,
-            message_id,
-            user_id
+            message_id
         )
         .fetch_all(&self.db)
         .await?;
 
-        Ok(reactions
+        // Group by emoji
+        let mut emoji_users: std::collections::HashMap<String, Vec<Uuid>> = std::collections::HashMap::new();
+        for r in reactions {
+            emoji_users
+                .entry(r.emoji)
+                .or_default()
+                .push(r.user_id);
+        }
+
+        // Convert to result format
+        let mut result: Vec<(String, Vec<Uuid>, bool)> = emoji_users
             .into_iter()
-            .map(|r| (r.emoji, r.count.unwrap_or(0), r.reacted_by_me.unwrap_or(false)))
-            .collect())
+            .map(|(emoji, user_ids)| {
+                let reacted_by_me = user_ids.contains(&user_id);
+                (emoji, user_ids, reacted_by_me)
+            })
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+
+        Ok(result)
     }
 
     /// Get reactions for multiple messages at once (more efficient)
-    pub async fn get_reactions_for_messages(&self, message_ids: &[Uuid], user_id: Uuid) -> Result<std::collections::HashMap<Uuid, Vec<(String, i64, bool)>>> {
+    pub async fn get_reactions_for_messages(&self, message_ids: &[Uuid], user_id: Uuid) -> Result<std::collections::HashMap<Uuid, Vec<(String, Vec<Uuid>, bool)>>> {
         if message_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
 
         let reactions = sqlx::query!(
             r#"
-            SELECT
-                message_id,
-                emoji,
-                COUNT(*) as count,
-                BOOL_OR(user_id = $2) as reacted_by_me
+            SELECT message_id, user_id, emoji
             FROM message_reactions
             WHERE message_id = ANY($1)
-            GROUP BY message_id, emoji
-            ORDER BY message_id, emoji
+            ORDER BY message_id, emoji, created_at
             "#,
-            message_ids,
-            user_id
+            message_ids
         )
         .fetch_all(&self.db)
         .await?;
 
-        let mut result: std::collections::HashMap<Uuid, Vec<(String, i64, bool)>> = std::collections::HashMap::new();
+        // Group by message_id, then by emoji
+        let mut message_emoji_users: std::collections::HashMap<Uuid, std::collections::HashMap<String, Vec<Uuid>>> =
+            std::collections::HashMap::new();
+
         for r in reactions {
-            result
+            message_emoji_users
                 .entry(r.message_id)
                 .or_default()
-                .push((r.emoji, r.count.unwrap_or(0), r.reacted_by_me.unwrap_or(false)));
+                .entry(r.emoji)
+                .or_default()
+                .push(r.user_id);
+        }
+
+        // Convert to result format
+        let mut result: std::collections::HashMap<Uuid, Vec<(String, Vec<Uuid>, bool)>> = std::collections::HashMap::new();
+        for (message_id, emoji_users) in message_emoji_users {
+            let mut reactions: Vec<(String, Vec<Uuid>, bool)> = emoji_users
+                .into_iter()
+                .map(|(emoji, user_ids)| {
+                    let reacted_by_me = user_ids.contains(&user_id);
+                    (emoji, user_ids, reacted_by_me)
+                })
+                .collect();
+            reactions.sort_by(|a, b| a.0.cmp(&b.0));
+            result.insert(message_id, reactions);
         }
 
         Ok(result)

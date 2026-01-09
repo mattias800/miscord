@@ -76,6 +76,6 @@ pub struct MessageAuthor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionCount {
     pub emoji: String,
-    pub count: i64,
+    pub user_ids: Vec<Uuid>,
     pub reacted_by_me: bool,
 }

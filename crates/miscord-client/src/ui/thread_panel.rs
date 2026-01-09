@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -6,7 +7,7 @@ use crate::network::NetworkClient;
 use crate::state::AppState;
 
 use super::message::{
-    render_message, MessageAction, MessageRenderOptions, MessageRendererState,
+    render_message, MessageAction, MessageRenderOptions, MessageRendererState, ReactionInfo,
 };
 
 pub struct ThreadPanel {
@@ -46,7 +47,7 @@ impl ThreadPanel {
         let mut should_close = false;
 
         // Get thread state
-        let (open_thread, thread_messages, parent_message, current_user_id) =
+        let (open_thread, thread_messages, parent_message, current_user_id, message_reactions) =
             runtime.block_on(async {
                 let s = state.read().await;
                 let open_thread = s.open_thread;
@@ -65,7 +66,35 @@ impl ThreadPanel {
 
                 let current_user_id = s.current_user.as_ref().map(|u| u.id);
 
-                (open_thread, thread_messages, parent_message, current_user_id)
+                // Get reactions for all messages (parent + thread replies)
+                let mut all_message_ids: Vec<Uuid> = thread_messages.iter().map(|m| m.id).collect();
+                if let Some(parent_id) = open_thread {
+                    all_message_ids.push(parent_id);
+                }
+
+                let message_reactions: HashMap<Uuid, Vec<ReactionInfo>> = all_message_ids
+                    .iter()
+                    .filter_map(|msg_id| {
+                        let reactions = s.message_reactions.get(msg_id)?;
+                        let mut counts: Vec<ReactionInfo> = reactions
+                            .iter()
+                            .map(|(emoji, reaction_state)| {
+                                let i_reacted = current_user_id
+                                    .map(|uid| reaction_state.has_user(uid))
+                                    .unwrap_or(false);
+                                (emoji.clone(), reaction_state.count(), i_reacted)
+                            })
+                            .collect();
+                        counts.sort_by(|a, b| a.0.cmp(&b.0));
+                        if counts.is_empty() {
+                            None
+                        } else {
+                            Some((*msg_id, counts))
+                        }
+                    })
+                    .collect();
+
+                (open_thread, thread_messages, parent_message, current_user_id, message_reactions)
             });
 
         let Some(parent_message_id) = open_thread else {
@@ -177,11 +206,12 @@ impl ThreadPanel {
 
                         // Show parent message
                         if let Some(parent) = &parent_message {
+                            let parent_reactions = message_reactions.get(&parent.id).map(|v| v.as_slice());
                             render_message(
                                 ui,
                                 parent,
                                 current_user_id,
-                                None, // Use message.reactions from loaded data
+                                parent_reactions,
                                 state,
                                 network,
                                 runtime,
@@ -214,11 +244,12 @@ impl ThreadPanel {
                             );
                         } else {
                             for message in &thread_messages {
+                                let msg_reactions = message_reactions.get(&message.id).map(|v| v.as_slice());
                                 render_message(
                                     ui,
                                     message,
                                     current_user_id,
-                                    None, // Use message.reactions from loaded data
+                                    msg_reactions,
                                     state,
                                     network,
                                     runtime,

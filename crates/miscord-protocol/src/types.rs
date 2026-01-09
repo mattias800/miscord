@@ -112,12 +112,21 @@ pub struct AttachmentData {
     pub url: String,
 }
 
-/// Reaction count
+/// Reaction data with user IDs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionData {
     pub emoji: String,
-    pub count: i64,
+    /// List of user IDs who reacted with this emoji
+    pub user_ids: Vec<Uuid>,
+    /// Convenience field: true if the requesting user reacted
     pub reacted_by_me: bool,
+}
+
+impl ReactionData {
+    /// Get the count of users who reacted
+    pub fn count(&self) -> usize {
+        self.user_ids.len()
+    }
 }
 
 #[cfg(test)]
