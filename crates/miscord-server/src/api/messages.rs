@@ -72,6 +72,9 @@ pub async fn list_messages(
             reply_to_id: msg.reply_to_id,
             reactions,
             created_at: msg.created_at,
+            thread_parent_id: msg.thread_parent_id,
+            reply_count: msg.reply_count,
+            last_reply_at: msg.last_reply_at,
         });
     }
 
@@ -107,6 +110,9 @@ pub async fn create_message(
         reply_to_id: message.reply_to_id,
         reactions: vec![], // New messages have no reactions
         created_at: message.created_at,
+        thread_parent_id: message.thread_parent_id,
+        reply_count: message.reply_count,
+        last_reply_at: message.last_reply_at,
     };
 
     // Broadcast to channel subscribers
@@ -165,6 +171,9 @@ pub async fn update_message(
         reply_to_id: message.reply_to_id,
         reactions,
         created_at: message.created_at,
+        thread_parent_id: message.thread_parent_id,
+        reply_count: message.reply_count,
+        last_reply_at: message.last_reply_at,
     };
 
     // Broadcast update
@@ -184,7 +193,7 @@ pub async fn delete_message(
     Path(id): Path<Uuid>,
 ) -> Result<()> {
     let message = state.message_service.get_by_id(id).await?;
-    state.message_service.delete(id, auth.user_id).await?;
+    let thread_parent_id = state.message_service.delete(id, auth.user_id).await?;
 
     // Broadcast deletion
     state.connections.broadcast_to_channel(
@@ -194,6 +203,20 @@ pub async fn delete_message(
             channel_id: message.channel_id,
         },
     ).await;
+
+    // If this was a thread reply, broadcast updated metadata for the parent
+    if let Some(parent_id) = thread_parent_id {
+        if let Ok(parent) = state.message_service.get_by_id(parent_id).await {
+            state.connections.broadcast_to_channel(
+                message.channel_id,
+                &miscord_protocol::ServerMessage::ThreadMetadataUpdated {
+                    message_id: parent_id,
+                    reply_count: parent.reply_count,
+                    last_reply_at: parent.last_reply_at,
+                },
+            ).await;
+        }
+    }
 
     Ok(())
 }
@@ -244,4 +267,175 @@ pub async fn remove_reaction(
     ).await;
 
     Ok(())
+}
+
+// Thread endpoints
+
+/// Get thread with parent message and replies
+pub async fn get_thread(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(parent_id): Path<Uuid>,
+    Query(query): Query<ListMessagesQuery>,
+) -> Result<Json<miscord_protocol::ThreadData>> {
+    let limit = query.limit.unwrap_or(50).min(100);
+
+    // Get parent message
+    let parent = state.message_service.get_by_id(parent_id).await?;
+    let parent_author = state
+        .user_service
+        .get_by_id(parent.author_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    // Get thread replies
+    let replies = state
+        .message_service
+        .get_thread_replies(parent_id, limit)
+        .await?;
+
+    // Get all message IDs for batch reaction lookup
+    let mut all_message_ids: Vec<Uuid> = replies.iter().map(|m| m.id).collect();
+    all_message_ids.push(parent_id);
+
+    let reactions_map = state
+        .message_service
+        .get_reactions_for_messages(&all_message_ids, auth.user_id)
+        .await
+        .unwrap_or_default();
+
+    // Build parent MessageData
+    let parent_reactions = reactions_map
+        .get(&parent.id)
+        .map(|r| {
+            r.iter()
+                .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                    emoji: emoji.clone(),
+                    count: *count,
+                    reacted_by_me: *reacted_by_me,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let parent_data = MessageData {
+        id: parent.id,
+        channel_id: parent.channel_id,
+        author_id: parent.author_id,
+        author_name: parent_author,
+        content: parent.content,
+        edited_at: parent.edited_at,
+        reply_to_id: parent.reply_to_id,
+        reactions: parent_reactions,
+        created_at: parent.created_at,
+        thread_parent_id: parent.thread_parent_id,
+        reply_count: parent.reply_count,
+        last_reply_at: parent.last_reply_at,
+    };
+
+    // Build reply MessageData list
+    let mut replies_data = Vec::with_capacity(replies.len());
+    for msg in replies {
+        let author_name = state
+            .user_service
+            .get_by_id(msg.author_id)
+            .await
+            .map(|u| u.display_name)
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        let reactions = reactions_map
+            .get(&msg.id)
+            .map(|r| {
+                r.iter()
+                    .map(|(emoji, count, reacted_by_me)| miscord_protocol::ReactionData {
+                        emoji: emoji.clone(),
+                        count: *count,
+                        reacted_by_me: *reacted_by_me,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        replies_data.push(MessageData {
+            id: msg.id,
+            channel_id: msg.channel_id,
+            author_id: msg.author_id,
+            author_name,
+            content: msg.content,
+            edited_at: msg.edited_at,
+            reply_to_id: msg.reply_to_id,
+            reactions,
+            created_at: msg.created_at,
+            thread_parent_id: msg.thread_parent_id,
+            reply_count: msg.reply_count,
+            last_reply_at: msg.last_reply_at,
+        });
+    }
+
+    Ok(Json(miscord_protocol::ThreadData {
+        parent_message: parent_data,
+        replies: replies_data,
+        total_reply_count: parent.reply_count,
+    }))
+}
+
+/// Create a thread reply
+pub async fn create_thread_reply(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(parent_id): Path<Uuid>,
+    Json(input): Json<CreateMessage>,
+) -> Result<Json<MessageData>> {
+    let message = state
+        .message_service
+        .create_thread_reply(parent_id, auth.user_id, input.content, input.reply_to_id)
+        .await?;
+
+    // Get author name
+    let author_name = state
+        .user_service
+        .get_by_id(auth.user_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let message_data = MessageData {
+        id: message.id,
+        channel_id: message.channel_id,
+        author_id: message.author_id,
+        author_name,
+        content: message.content,
+        edited_at: message.edited_at,
+        reply_to_id: message.reply_to_id,
+        reactions: vec![],
+        created_at: message.created_at,
+        thread_parent_id: message.thread_parent_id,
+        reply_count: message.reply_count,
+        last_reply_at: message.last_reply_at,
+    };
+
+    // Get updated parent for metadata
+    let parent = state.message_service.get_by_id(parent_id).await?;
+
+    // Broadcast the new reply to thread subscribers
+    state.connections.broadcast_to_thread(
+        parent_id,
+        &miscord_protocol::ServerMessage::ThreadReplyCreated {
+            parent_message_id: parent_id,
+            message: message_data.clone(),
+        },
+    ).await;
+
+    // Broadcast updated parent metadata to channel subscribers
+    state.connections.broadcast_to_channel(
+        message.channel_id,
+        &miscord_protocol::ServerMessage::ThreadMetadataUpdated {
+            message_id: parent_id,
+            reply_count: parent.reply_count,
+            last_reply_at: parent.last_reply_at,
+        },
+    ).await;
+
+    Ok(Json(message_data))
 }

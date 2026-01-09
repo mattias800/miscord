@@ -5,11 +5,13 @@ mod chat;
 mod community_list;
 mod channel_list;
 mod member_list;
+mod message;
 mod voice;
 mod voice_channel_view;
 mod markdown;
 mod settings;
 mod screen_picker;
+mod thread_panel;
 pub mod theme;
 
 pub use app::MiscordApp;

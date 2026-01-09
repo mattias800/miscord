@@ -310,6 +310,20 @@ async fn handle_client_message(
         } => {
             handle_sfu_unsubscribe_track(state, user_id, target_user_id, track_type).await;
         }
+        ClientMessage::SubscribeThread { parent_message_id } => {
+            state
+                .connections
+                .subscribe_to_thread(connection_id, parent_message_id)
+                .await;
+            tracing::debug!("User {} subscribed to thread {}", user_id, parent_message_id);
+        }
+        ClientMessage::UnsubscribeThread { parent_message_id } => {
+            state
+                .connections
+                .unsubscribe_from_thread(connection_id, parent_message_id)
+                .await;
+            tracing::debug!("User {} unsubscribed from thread {}", user_id, parent_message_id);
+        }
     }
 }
 

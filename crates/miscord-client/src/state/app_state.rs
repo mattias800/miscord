@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -81,6 +82,10 @@ pub struct AppStateInner {
     pub pending_sfu_ice_candidates: Vec<SfuIceCandidate>,
     pub sfu_tracks: HashMap<Uuid, Vec<SfuTrackInfo>>, // user_id -> tracks
     pub pending_keyframe_requests: Vec<miscord_protocol::TrackType>,
+
+    // Thread state
+    pub open_thread: Option<Uuid>, // Parent message ID of currently open thread
+    pub thread_messages: HashMap<Uuid, Vec<MessageData>>, // parent_message_id -> thread replies
 }
 
 impl Default for AppStateInner {
@@ -125,6 +130,8 @@ impl Default for AppStateInner {
             pending_sfu_ice_candidates: Vec::new(),
             sfu_tracks: HashMap::new(),
             pending_keyframe_requests: Vec::new(),
+            open_thread: None,
+            thread_messages: HashMap::new(),
         }
     }
 }
@@ -323,13 +330,16 @@ impl AppState {
     // Reaction methods
     pub async fn add_reaction(&self, message_id: Uuid, user_id: Uuid, emoji: &str) {
         let mut state = self.inner.write().await;
-        state
+        let users = state
             .message_reactions
             .entry(message_id)
             .or_default()
             .entry(emoji.to_string())
-            .or_default()
-            .push(user_id);
+            .or_default();
+        // Avoid duplicates
+        if !users.contains(&user_id) {
+            users.push(user_id);
+        }
     }
 
     pub async fn remove_reaction(&self, message_id: Uuid, user_id: Uuid, emoji: &str) {
@@ -503,6 +513,76 @@ impl AppState {
     pub async fn take_pending_keyframe_requests(&self) -> Vec<miscord_protocol::TrackType> {
         let mut state = self.inner.write().await;
         std::mem::take(&mut state.pending_keyframe_requests)
+    }
+
+    // Thread methods
+
+    /// Open a thread panel for a message
+    pub async fn open_thread(&self, parent_message_id: Uuid) {
+        let mut state = self.inner.write().await;
+        state.open_thread = Some(parent_message_id);
+    }
+
+    /// Close the thread panel
+    pub async fn close_thread(&self) {
+        let mut state = self.inner.write().await;
+        state.open_thread = None;
+    }
+
+    /// Set thread messages (when loading a thread)
+    pub async fn set_thread_messages(&self, parent_message_id: Uuid, messages: Vec<MessageData>) {
+        let mut state = self.inner.write().await;
+        state.thread_messages.insert(parent_message_id, messages);
+    }
+
+    /// Add a new thread reply (from WebSocket)
+    pub async fn add_thread_reply(&self, parent_message_id: Uuid, message: MessageData) {
+        let mut state = self.inner.write().await;
+        state
+            .thread_messages
+            .entry(parent_message_id)
+            .or_default()
+            .push(message);
+    }
+
+    /// Update thread metadata on a message (reply_count, last_reply_at)
+    pub async fn update_thread_metadata(
+        &self,
+        message_id: Uuid,
+        reply_count: i32,
+        last_reply_at: Option<DateTime<Utc>>,
+    ) {
+        let mut state = self.inner.write().await;
+        // Update the message in all channel message lists
+        for messages in state.messages.values_mut() {
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.reply_count = reply_count;
+                msg.last_reply_at = last_reply_at;
+                break;
+            }
+        }
+    }
+
+    /// Get the currently open thread's parent message ID
+    pub async fn get_open_thread(&self) -> Option<Uuid> {
+        self.inner.read().await.open_thread
+    }
+
+    /// Get thread messages for a parent message
+    pub async fn get_thread_messages(&self, parent_message_id: Uuid) -> Vec<MessageData> {
+        self.inner
+            .read()
+            .await
+            .thread_messages
+            .get(&parent_message_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Clear thread messages (when closing thread or switching channels)
+    pub async fn clear_thread_messages(&self, parent_message_id: Uuid) {
+        let mut state = self.inner.write().await;
+        state.thread_messages.remove(&parent_message_id);
     }
 }
 

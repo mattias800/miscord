@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub struct ConnectionInfo {
     pub user_id: Uuid,
     pub subscribed_channels: HashSet<Uuid>,
+    pub subscribed_threads: HashSet<Uuid>,
 }
 
 pub struct ConnectionManager {
@@ -18,6 +19,8 @@ pub struct ConnectionManager {
     user_connections: RwLock<HashMap<Uuid, HashSet<Uuid>>>,
     /// Map from channel ID to connection IDs subscribed to that channel
     channel_subscribers: RwLock<HashMap<Uuid, HashSet<Uuid>>>,
+    /// Map from thread parent message ID to connection IDs subscribed to that thread
+    thread_subscribers: RwLock<HashMap<Uuid, HashSet<Uuid>>>,
 }
 
 impl ConnectionManager {
@@ -27,6 +30,7 @@ impl ConnectionManager {
             connection_info: RwLock::new(HashMap::new()),
             user_connections: RwLock::new(HashMap::new()),
             channel_subscribers: RwLock::new(HashMap::new()),
+            thread_subscribers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -43,6 +47,7 @@ impl ConnectionManager {
             ConnectionInfo {
                 user_id,
                 subscribed_channels: HashSet::new(),
+                subscribed_threads: HashSet::new(),
             },
         );
 
@@ -73,6 +78,13 @@ impl ConnectionManager {
             // Remove from channel subscribers
             for channel_id in &info.subscribed_channels {
                 if let Some(subs) = self.channel_subscribers.write().await.get_mut(channel_id) {
+                    subs.remove(&connection_id);
+                }
+            }
+
+            // Remove from thread subscribers
+            for thread_id in &info.subscribed_threads {
+                if let Some(subs) = self.thread_subscribers.write().await.get_mut(thread_id) {
                     subs.remove(&connection_id);
                 }
             }
@@ -109,6 +121,59 @@ impl ConnectionManager {
 
         if let Some(subs) = self.channel_subscribers.write().await.get_mut(&channel_id) {
             subs.remove(&connection_id);
+        }
+    }
+
+    pub async fn subscribe_to_thread(&self, connection_id: Uuid, thread_id: Uuid) {
+        if let Some(info) = self.connection_info.write().await.get_mut(&connection_id) {
+            info.subscribed_threads.insert(thread_id);
+        }
+
+        self.thread_subscribers
+            .write()
+            .await
+            .entry(thread_id)
+            .or_default()
+            .insert(connection_id);
+
+        tracing::debug!("Connection {} subscribed to thread {}", connection_id, thread_id);
+    }
+
+    pub async fn unsubscribe_from_thread(&self, connection_id: Uuid, thread_id: Uuid) {
+        if let Some(info) = self.connection_info.write().await.get_mut(&connection_id) {
+            info.subscribed_threads.remove(&thread_id);
+        }
+
+        if let Some(subs) = self.thread_subscribers.write().await.get_mut(&thread_id) {
+            subs.remove(&connection_id);
+        }
+
+        tracing::debug!("Connection {} unsubscribed from thread {}", connection_id, thread_id);
+    }
+
+    pub async fn broadcast_to_thread(&self, thread_id: Uuid, message: &ServerMessage) {
+        let json = match serde_json::to_string(message) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("Failed to serialize message: {}", e);
+                return;
+            }
+        };
+
+        let subscribers = self.thread_subscribers.read().await;
+        let senders = self.senders.read().await;
+
+        if let Some(subs) = subscribers.get(&thread_id) {
+            tracing::debug!("Broadcasting to {} subscribers of thread {}", subs.len(), thread_id);
+            for conn_id in subs {
+                if let Some(sender) = senders.get(conn_id) {
+                    if let Err(e) = sender.send(json.clone()) {
+                        tracing::error!("Failed to send message to {}: {}", conn_id, e);
+                    }
+                }
+            }
+        } else {
+            tracing::debug!("No subscribers for thread {}", thread_id);
         }
     }
 

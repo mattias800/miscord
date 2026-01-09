@@ -11,6 +11,9 @@ pub struct Message {
     pub content: String,
     pub edited_at: Option<DateTime<Utc>>,
     pub reply_to_id: Option<Uuid>,
+    pub thread_parent_id: Option<Uuid>,
+    pub reply_count: i32,
+    pub last_reply_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -54,6 +57,9 @@ pub struct MessageWithAuthor {
     pub content: String,
     pub edited_at: Option<DateTime<Utc>>,
     pub reply_to_id: Option<Uuid>,
+    pub thread_parent_id: Option<Uuid>,
+    pub reply_count: i32,
+    pub last_reply_at: Option<DateTime<Utc>>,
     pub attachments: Vec<MessageAttachment>,
     pub reactions: Vec<ReactionCount>,
     pub created_at: DateTime<Utc>,

@@ -3,7 +3,7 @@ mod websocket;
 
 use crate::state::{AppState, LoginRequest, LoginResponse, RegisterRequest, RegisterResponse};
 use anyhow::Result;
-use miscord_protocol::{ChannelData, ChannelType, CommunityData, MessageData, UserData};
+use miscord_protocol::{ChannelData, ChannelType, CommunityData, MessageData, ThreadData, UserData};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -335,6 +335,62 @@ impl NetworkClient {
             token.as_deref(),
         )
         .await
+    }
+
+    // Threads
+
+    /// Get thread with parent message and replies
+    pub async fn get_thread(&self, parent_message_id: Uuid) -> Result<ThreadData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::get(
+            &format!("{}/api/messages/{}/thread", server_url, parent_message_id),
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Create a reply in a thread
+    pub async fn send_thread_reply(
+        &self,
+        parent_message_id: Uuid,
+        content: &str,
+        reply_to_id: Option<Uuid>,
+    ) -> Result<MessageData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        #[derive(serde::Serialize)]
+        struct CreateThreadReply {
+            content: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_to_id: Option<Uuid>,
+        }
+
+        api::post(
+            &format!("{}/api/messages/{}/replies", server_url, parent_message_id),
+            &CreateThreadReply {
+                content: content.to_string(),
+                reply_to_id,
+            },
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Subscribe to thread updates via WebSocket
+    pub async fn subscribe_thread(&self, parent_message_id: Uuid) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.subscribe_thread(parent_message_id).await;
+        }
+    }
+
+    /// Unsubscribe from thread updates via WebSocket
+    pub async fn unsubscribe_thread(&self, parent_message_id: Uuid) {
+        if let Some(client) = self.ws_client.read().await.as_ref() {
+            client.unsubscribe_thread(parent_message_id).await;
+        }
     }
 
     // Voice

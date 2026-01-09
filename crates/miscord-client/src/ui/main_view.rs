@@ -9,6 +9,7 @@ use super::channel_list::ChannelList;
 use super::chat::ChatView;
 use super::community_list::CommunityList;
 use super::member_list::MemberList;
+use super::thread_panel::ThreadPanel;
 use super::voice::VoicePanel;
 use super::voice_channel_view::VoiceChannelView;
 
@@ -17,6 +18,7 @@ pub struct MainView {
     channel_list: ChannelList,
     chat_view: ChatView,
     member_list: MemberList,
+    thread_panel: ThreadPanel,
     voice_panel: VoicePanel,
     voice_channel_view: VoiceChannelView,
     // Audio state for voice channels
@@ -33,6 +35,7 @@ impl MainView {
             channel_list: ChannelList::new(),
             chat_view: ChatView::new(),
             member_list: MemberList::new(),
+            thread_panel: ThreadPanel::new(),
             voice_panel: VoicePanel::new(),
             voice_channel_view: VoiceChannelView::new(),
             audio_capture: None,
@@ -145,6 +148,11 @@ impl MainView {
                 });
             });
 
+        // Check if thread is open
+        let thread_open = runtime.block_on(async {
+            state.read().await.open_thread.is_some()
+        });
+
         // Right panel - Always show member list when in a community
         if has_community {
             egui::SidePanel::right("member_panel")
@@ -153,6 +161,24 @@ impl MainView {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         self.member_list.show(ui, state, runtime);
                     });
+                });
+        }
+
+        // Thread panel (between chat and member list)
+        if thread_open && !in_voice {
+            egui::SidePanel::right("thread_panel")
+                .min_width(320.0)
+                .max_width(450.0)
+                .show(ctx, |ui| {
+                    let should_close = self.thread_panel.show(ui, state, network, runtime);
+                    if should_close {
+                        let state = state.clone();
+                        let network = network.clone();
+                        self.thread_panel.cleanup(&network, runtime);
+                        runtime.spawn(async move {
+                            state.close_thread().await;
+                        });
+                    }
                 });
         }
 

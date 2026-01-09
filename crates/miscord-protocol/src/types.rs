@@ -68,6 +68,19 @@ pub struct MessageData {
     #[serde(default)]
     pub reactions: Vec<ReactionData>,
     pub created_at: DateTime<Utc>,
+    // Thread fields
+    pub thread_parent_id: Option<Uuid>,
+    #[serde(default)]
+    pub reply_count: i32,
+    pub last_reply_at: Option<DateTime<Utc>>,
+}
+
+/// Thread data with parent message and replies
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadData {
+    pub parent_message: MessageData,
+    pub replies: Vec<MessageData>,
+    pub total_reply_count: i32,
 }
 
 /// Voice state data

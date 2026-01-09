@@ -268,6 +268,20 @@ impl WebSocketClient {
             ServerMessage::Error { message } => {
                 tracing::error!("Server error: {}", message);
             }
+            // Thread messages
+            ServerMessage::ThreadReplyCreated {
+                parent_message_id,
+                message,
+            } => {
+                state.add_thread_reply(parent_message_id, message).await;
+            }
+            ServerMessage::ThreadMetadataUpdated {
+                message_id,
+                reply_count,
+                last_reply_at,
+            } => {
+                state.update_thread_metadata(message_id, reply_count, last_reply_at).await;
+            }
             _ => {}
         }
     }
@@ -382,6 +396,24 @@ impl WebSocketClient {
                 user_id,
                 track_type: TrackType::Screen,
             })
+            .await;
+    }
+
+    /// Subscribe to thread updates
+    pub async fn subscribe_thread(&self, parent_message_id: Uuid) {
+        tracing::debug!("Subscribing to thread {}", parent_message_id);
+        let _ = self
+            .sender
+            .send(ClientMessage::SubscribeThread { parent_message_id })
+            .await;
+    }
+
+    /// Unsubscribe from thread updates
+    pub async fn unsubscribe_thread(&self, parent_message_id: Uuid) {
+        tracing::debug!("Unsubscribing from thread {}", parent_message_id);
+        let _ = self
+            .sender
+            .send(ClientMessage::UnsubscribeThread { parent_message_id })
             .await;
     }
 }

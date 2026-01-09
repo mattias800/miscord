@@ -67,6 +67,15 @@ pub fn create_router(state: AppState) -> Router {
             "/api/messages/{id}/reactions/{emoji}",
             post(messages::add_reaction).delete(messages::remove_reaction),
         )
+        // Thread routes
+        .route(
+            "/api/messages/{id}/thread",
+            get(messages::get_thread),
+        )
+        .route(
+            "/api/messages/{id}/replies",
+            post(messages::create_thread_reply),
+        )
         // Voice routes
         .route("/api/channels/{id}/voice/join", post(channels::join_voice))
         .route("/api/channels/{id}/voice/participants", get(channels::get_voice_participants))

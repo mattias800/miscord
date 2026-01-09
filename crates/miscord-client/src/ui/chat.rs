@@ -8,11 +8,12 @@ use crate::network::NetworkClient;
 use crate::state::AppState;
 use miscord_protocol::MessageData;
 
+use super::message::{
+    render_message, MessageAction, MessageRenderOptions, MessageRendererState, ReactionInfo,
+};
+
 /// How often to send typing indicators (in seconds)
 const TYPING_THROTTLE_SECS: u64 = 3;
-
-/// Common reaction emojis
-const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🎉"];
 
 pub struct ChatView {
     message_input: String,
@@ -20,41 +21,12 @@ pub struct ChatView {
     last_typing_sent: Option<Instant>,
     /// Previous message input length (to detect changes)
     prev_input_len: usize,
-    /// Message ID for which emoji picker is open
-    emoji_picker_open_for: Option<Uuid>,
     /// Message being replied to
     replying_to: Option<MessageData>,
     /// Message being edited (stores original message)
     editing_message: Option<MessageData>,
-}
-
-/// Format a timestamp as relative time ("Just now", "2m ago", etc.)
-fn format_relative_time(timestamp: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(timestamp);
-
-    if duration.num_seconds() < 60 {
-        "Just now".to_string()
-    } else if duration.num_minutes() < 60 {
-        let mins = duration.num_minutes();
-        format!("{}m ago", mins)
-    } else if duration.num_hours() < 24 {
-        let hours = duration.num_hours();
-        format!("{}h ago", hours)
-    } else if duration.num_days() == 1 {
-        "Yesterday".to_string()
-    } else if duration.num_days() < 7 {
-        let days = duration.num_days();
-        format!("{}d ago", days)
-    } else {
-        // Show full date for older messages
-        timestamp.with_timezone(&Local).format("%b %d, %Y").to_string()
-    }
-}
-
-/// Format a full timestamp for tooltip
-fn format_full_timestamp(timestamp: DateTime<Utc>) -> String {
-    timestamp.with_timezone(&Local).format("%B %d, %Y at %I:%M %p").to_string()
+    /// Shared message renderer state
+    renderer_state: MessageRendererState,
 }
 
 /// Get date separator text for a message
@@ -86,9 +58,9 @@ impl ChatView {
             message_input: String::new(),
             last_typing_sent: None,
             prev_input_len: 0,
-            emoji_picker_open_for: None,
             replying_to: None,
             editing_message: None,
+            renderer_state: MessageRendererState::new(),
         }
     }
 
@@ -99,7 +71,7 @@ impl ChatView {
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
-        let (current_channel, messages, channel_name, typing_usernames, message_reactions, current_user_id) = runtime.block_on(async {
+        let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions) = runtime.block_on(async {
             let s = state.read().await;
             let channel_id = s.current_channel_id;
             let messages = channel_id
@@ -115,12 +87,11 @@ impl ChatView {
             let current_user_id = s.current_user.as_ref().map(|u| u.id);
 
             // Get all reactions for messages in this channel
-            // Store as Vec for stable ordering, and include whether current user reacted
-            let message_reactions: HashMap<Uuid, Vec<(String, usize, bool)>> = messages
+            let message_reactions: HashMap<Uuid, Vec<ReactionInfo>> = messages
                 .iter()
                 .filter_map(|msg| {
                     let reactions = s.message_reactions.get(&msg.id)?;
-                    let mut counts: Vec<(String, usize, bool)> = reactions
+                    let mut counts: Vec<ReactionInfo> = reactions
                         .iter()
                         .map(|(emoji, users)| {
                             let i_reacted = current_user_id
@@ -140,7 +111,6 @@ impl ChatView {
                 .collect();
 
             // Get typing users (excluding self)
-            let current_user_id = s.current_user.as_ref().map(|u| u.id);
             let typing_users = if let Some(cid) = channel_id {
                 state.get_typing_users(cid).await
             } else {
@@ -164,7 +134,7 @@ impl ChatView {
                 })
                 .collect();
 
-            (channel_id, messages, channel_name, typing_usernames, message_reactions, current_user_id)
+            (channel_id, messages, channel_name, typing_usernames, current_user_id, message_reactions)
         });
 
         if current_channel.is_none() {
@@ -175,9 +145,6 @@ impl ChatView {
         }
 
         let channel_id = current_channel.unwrap();
-
-        // Use TopBottomPanel pattern within the central panel area
-        // This ensures input stays at bottom and messages fill remaining space
 
         // Channel header at top
         egui::TopBottomPanel::top("chat_header")
@@ -211,7 +178,6 @@ impl ChatView {
                         );
                     });
                 } else {
-                    // Reserve space even when no one is typing
                     ui.label(
                         egui::RichText::new(" ")
                             .small(),
@@ -290,7 +256,6 @@ impl ChatView {
                         let shift_held = ui.input(|i| i.modifiers.shift);
 
                         if enter_pressed && !shift_held {
-                            // Remove the newline that was just inserted
                             if self.message_input.ends_with('\n') {
                                 self.message_input.pop();
                             }
@@ -308,7 +273,6 @@ impl ChatView {
                 // Send typing indicator when user is typing
                 let current_len = self.message_input.len();
                 if current_len > self.prev_input_len && current_len > 0 {
-                    // User is typing - send indicator if throttle period has passed
                     let should_send = self.last_typing_sent
                         .map(|t| t.elapsed().as_secs() >= TYPING_THROTTLE_SECS)
                         .unwrap_or(true);
@@ -324,17 +288,24 @@ impl ChatView {
                 self.prev_input_len = current_len;
             });
 
-        // Messages area fills remaining space (CentralPanel fills what's left)
+        // Messages area fills remaining space
         egui::CentralPanel::default()
             .show_inside(ui, |ui| {
                 // Build a lookup map for reply previews
                 let message_lookup: HashMap<Uuid, &MessageData> = messages.iter().map(|m| (m.id, m)).collect();
 
+                // Options for chat messages
+                let options = MessageRenderOptions {
+                    show_thread_button: true,
+                    show_thread_indicator: true,
+                    show_reply_button: true,
+                    id_prefix: "chat",
+                };
+
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        // Constrain width to prevent horizontal overflow
                         ui.set_width(ui.available_width());
 
                         let mut prev_message: Option<&MessageData> = None;
@@ -363,7 +334,6 @@ impl ChatView {
                             // Show reply preview if this is a reply
                             if let Some(reply_to_id) = message.reply_to_id {
                                 if let Some(original_msg) = message_lookup.get(&reply_to_id) {
-                                    // Truncate content for preview
                                     let preview_content: String = original_msg.content.chars().take(100).collect();
                                     let preview_content = if original_msg.content.len() > 100 {
                                         format!("{}...", preview_content)
@@ -373,7 +343,6 @@ impl ChatView {
 
                                     ui.horizontal(|ui| {
                                         ui.add_space(16.0);
-                                        // Reply indicator line
                                         ui.label(
                                             egui::RichText::new("┌─")
                                                 .color(egui::Color32::from_rgb(100, 100, 100)),
@@ -391,7 +360,6 @@ impl ChatView {
                                         );
                                     });
                                 } else {
-                                    // Original message not found (possibly deleted or not loaded)
                                     ui.horizontal(|ui| {
                                         ui.add_space(16.0);
                                         ui.label(
@@ -404,164 +372,37 @@ impl ChatView {
                                 }
                             }
 
-                            // Message header: author name, timestamp, and action buttons on right
-                            let is_own_message = current_user_id.map_or(false, |uid| uid == message.author_id);
+                            // Get reactions for this message from state
+                            let reactions = message_reactions.get(&message.id).map(|v| v.as_slice());
 
-                            ui.horizontal(|ui| {
-                                // Author name
-                                ui.label(
-                                    egui::RichText::new(&message.author_name)
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(88, 101, 242)),
-                                );
-
-                                // Timestamp
-                                let relative_time = format_relative_time(message.created_at);
-                                let full_time = format_full_timestamp(message.created_at);
-                                let time_label = ui.label(
-                                    egui::RichText::new(&relative_time)
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-                                time_label.on_hover_text(&full_time);
-
-                                if message.edited_at.is_some() {
-                                    ui.label(
-                                        egui::RichText::new("(edited)")
-                                            .small()
-                                            .color(egui::Color32::from_rgb(160, 160, 160)),
-                                    );
-                                }
-
-                                // Action buttons - shown inline with small separator
-                                ui.add_space(8.0);
-                                ui.label(
-                                    egui::RichText::new("|")
-                                        .small()
-                                        .color(egui::Color32::from_rgb(80, 80, 80)),
-                                );
-                                ui.add_space(4.0);
-
-                                // Reply button
-                                let reply_btn = ui.small_button("↩");
-                                if reply_btn.clicked() {
-                                    self.replying_to = Some(message.clone());
-                                    self.editing_message = None;
-                                }
-                                reply_btn.on_hover_text("Reply");
-
-                                // React button
-                                let react_btn = ui.small_button("+");
-                                let react_btn_clicked = react_btn.clicked();
-                                let react_btn_rect = react_btn.rect;
-                                react_btn.on_hover_text("Add reaction");
-
-                                if react_btn_clicked {
-                                    if self.emoji_picker_open_for == Some(message.id) {
-                                        self.emoji_picker_open_for = None;
-                                    } else {
-                                        self.emoji_picker_open_for = Some(message.id);
+                            // Render the message using the shared component
+                            if let Some(action) = render_message(
+                                ui,
+                                message,
+                                current_user_id,
+                                reactions,
+                                state,
+                                network,
+                                runtime,
+                                &mut self.renderer_state,
+                                &options,
+                            ) {
+                                match action {
+                                    MessageAction::Reply(msg) => {
+                                        self.replying_to = Some(msg);
+                                        self.editing_message = None;
                                     }
-                                }
-
-                                // Show emoji picker popup
-                                if self.emoji_picker_open_for == Some(message.id) {
-                                    let popup_id = egui::Id::new(format!("emoji_picker_{}", message.id));
-                                    egui::Area::new(popup_id)
-                                        .fixed_pos(egui::pos2(react_btn_rect.left(), react_btn_rect.bottom() + 2.0))
-                                        .show(ui.ctx(), |ui| {
-                                            egui::Frame::popup(ui.style())
-                                                .show(ui, |ui| {
-                                                    ui.horizontal(|ui| {
-                                                        for emoji in REACTION_EMOJIS {
-                                                            if ui.button(*emoji).clicked() {
-                                                                let network = network.clone();
-                                                                let msg_id = message.id;
-                                                                let emoji_str = emoji.to_string();
-                                                                runtime.spawn(async move {
-                                                                    if let Err(e) = network.add_reaction(msg_id, &emoji_str).await {
-                                                                        tracing::warn!("Failed to add reaction: {}", e);
-                                                                    }
-                                                                });
-                                                                self.emoji_picker_open_for = None;
-                                                            }
-                                                        }
-                                                    });
-                                                });
-                                        });
-                                }
-
-                                // Edit button (only for own messages)
-                                if is_own_message {
-                                    let edit_btn = ui.small_button("✏");
-                                    if edit_btn.clicked() {
-                                        self.editing_message = Some(message.clone());
-                                        self.message_input = message.content.clone();
+                                    MessageAction::Edit(msg) => {
+                                        self.editing_message = Some(msg.clone());
+                                        self.message_input = msg.content.clone();
                                         self.replying_to = None;
                                     }
-                                    edit_btn.on_hover_text("Edit");
-                                }
-
-                                // Delete button (only for own messages)
-                                if is_own_message {
-                                    let del_btn = ui.small_button("🗑");
-                                    if del_btn.clicked() {
-                                        let network = network.clone();
-                                        let msg_id = message.id;
+                                    MessageAction::OpenThread(msg_id) => {
+                                        let state = state.clone();
                                         runtime.spawn(async move {
-                                            if let Err(e) = network.delete_message(msg_id).await {
-                                                tracing::warn!("Failed to delete message: {}", e);
-                                            }
+                                            state.open_thread(msg_id).await;
                                         });
                                     }
-                                    del_btn.on_hover_text("Delete");
-                                }
-                            });
-
-                            // Message content with markdown rendering
-                            ui.indent("msg_content", |ui| {
-                                super::markdown::render_markdown(ui, &message.content);
-                            });
-
-                            // Display existing reactions (clickable to toggle)
-                            if let Some(reactions) = message_reactions.get(&message.id) {
-                                if !reactions.is_empty() {
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(16.0);
-                                        for (emoji, count, i_reacted) in reactions.iter() {
-                                            let reaction_text = format!("{} {}", emoji, count);
-                                            let fill_color = if *i_reacted {
-                                                egui::Color32::from_rgb(88, 101, 242)
-                                            } else {
-                                                egui::Color32::from_rgb(50, 50, 60)
-                                            };
-                                            let btn = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new(reaction_text).small()
-                                                )
-                                                .small()
-                                                .fill(fill_color)
-                                                .rounding(egui::Rounding::same(12.0))
-                                            );
-                                            if btn.clicked() {
-                                                let network = network.clone();
-                                                let msg_id = message.id;
-                                                let emoji_str = emoji.clone();
-                                                let should_remove = *i_reacted;
-                                                runtime.spawn(async move {
-                                                    if should_remove {
-                                                        if let Err(e) = network.remove_reaction(msg_id, &emoji_str).await {
-                                                            tracing::warn!("Failed to remove reaction: {}", e);
-                                                        }
-                                                    } else {
-                                                        if let Err(e) = network.add_reaction(msg_id, &emoji_str).await {
-                                                            tracing::warn!("Failed to add reaction: {}", e);
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    });
                                 }
                             }
 
@@ -594,7 +435,6 @@ impl ChatView {
 
         // Check if we're editing or replying
         if let Some(edit_msg) = self.editing_message.take() {
-            // Edit existing message
             runtime.spawn(async move {
                 network.stop_typing(channel_id).await;
                 if let Err(e) = network.update_message(edit_msg.id, &content).await {
@@ -602,7 +442,6 @@ impl ChatView {
                 }
             });
         } else {
-            // Send new message (with optional reply)
             let reply_to_id = self.replying_to.take().map(|m| m.id);
             runtime.spawn(async move {
                 network.stop_typing(channel_id).await;

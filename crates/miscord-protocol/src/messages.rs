@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -87,6 +88,12 @@ pub enum ClientMessage {
 
     /// SFU: Unsubscribe from a user's screen share track
     SfuUnsubscribeTrack { user_id: Uuid, track_type: TrackType },
+
+    /// Subscribe to thread updates
+    SubscribeThread { parent_message_id: Uuid },
+
+    /// Unsubscribe from thread updates
+    UnsubscribeThread { parent_message_id: Uuid },
 }
 
 /// Messages sent from server to client via WebSocket
@@ -186,4 +193,17 @@ pub enum ServerMessage {
 
     /// SFU: Request keyframe from encoder (when new subscriber joins)
     SfuRequestKeyframe { track_type: TrackType },
+
+    /// Thread: New reply created in a thread
+    ThreadReplyCreated {
+        parent_message_id: Uuid,
+        message: MessageData,
+    },
+
+    /// Thread: Metadata updated (reply_count, last_reply_at)
+    ThreadMetadataUpdated {
+        message_id: Uuid,
+        reply_count: i32,
+        last_reply_at: Option<DateTime<Utc>>,
+    },
 }
