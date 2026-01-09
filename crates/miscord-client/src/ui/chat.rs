@@ -647,12 +647,13 @@ impl ChatView {
                 self.mention_selected = 0;
             } else {
                 // Active mention - extract query
-                self.mention_active = true;
-                self.mention_query = after_at.to_string();
-                // Reset selection when query changes
-                if self.mention_selected > 0 {
+                let new_query = after_at.to_string();
+                // Only reset selection when query actually changes
+                if new_query != self.mention_query {
                     self.mention_selected = 0;
                 }
+                self.mention_active = true;
+                self.mention_query = new_query;
             }
         } else {
             self.mention_active = false;
