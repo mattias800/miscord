@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use uuid::Uuid;
 
 /// Get the current profile name from environment or use "default"
 fn get_profile_name() -> String {
@@ -194,6 +195,92 @@ impl PersistentSettings {
             }
             Err(e) => {
                 tracing::error!("Failed to serialize settings: {}", e);
+            }
+        }
+    }
+}
+
+/// Persistent UI state (community/channel selection, collapsed sections)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UiState {
+    /// Currently selected community ID
+    pub current_community_id: Option<Uuid>,
+    /// Currently selected text channel ID
+    pub current_channel_id: Option<Uuid>,
+    /// Whether the text channels section is expanded
+    #[serde(default = "default_true")]
+    pub text_channels_expanded: bool,
+    /// Whether the voice channels section is expanded
+    #[serde(default = "default_true")]
+    pub voice_channels_expanded: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl UiState {
+    /// Get the UI state file path for the current profile
+    fn ui_state_path() -> Option<PathBuf> {
+        let profile = get_profile_name();
+        get_config_dir().map(|p| p.join("ui_state").join(format!("{}.json", profile)))
+    }
+
+    /// Load UI state from disk
+    pub fn load() -> Self {
+        let Some(path) = Self::ui_state_path() else {
+            tracing::warn!("Could not determine config directory for UI state");
+            return Self::default();
+        };
+
+        if !path.exists() {
+            tracing::debug!("UI state file does not exist, using defaults");
+            return Self::default();
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(state) => {
+                    tracing::info!("Loaded UI state from {:?}", path);
+                    state
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse UI state file: {}", e);
+                    Self::default()
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to read UI state file: {}", e);
+                Self::default()
+            }
+        }
+    }
+
+    /// Save UI state to disk
+    pub fn save(&self) {
+        let Some(path) = Self::ui_state_path() else {
+            tracing::warn!("Could not determine config directory for UI state");
+            return;
+        };
+
+        // Create directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::error!("Failed to create UI state directory: {}", e);
+                return;
+            }
+        }
+
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::error!("Failed to write UI state file: {}", e);
+                } else {
+                    tracing::debug!("Saved UI state to {:?}", path);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize UI state: {}", e);
             }
         }
     }

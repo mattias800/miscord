@@ -39,13 +39,18 @@ impl ChannelList {
         }
     }
 
+    /// Show the channel list. Returns (text_channels_expanded, voice_channels_expanded).
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         state: &AppState,
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
-    ) {
+        text_channels_expanded: bool,
+        voice_channels_expanded: bool,
+    ) -> (bool, bool) {
+        let mut text_expanded = text_channels_expanded;
+        let mut voice_expanded = voice_channels_expanded;
         let (current_community, channels, current_channel) = runtime.block_on(async {
             let s = state.read().await;
             let current_community = s.current_community_id;
@@ -63,7 +68,7 @@ impl ChannelList {
             ui.centered_and_justified(|ui| {
                 ui.label("Select a community");
             });
-            return;
+            return (text_expanded, voice_expanded);
         }
 
         let community_id = current_community.unwrap();
@@ -118,7 +123,9 @@ impl ChannelList {
                 .collect();
 
             if !text_channels.is_empty() {
-                ui.collapsing("Text Channels", |ui| {
+                let text_response = egui::CollapsingHeader::new("Text Channels")
+                    .default_open(text_expanded)
+                    .show(ui, |ui| {
                     for channel in text_channels {
                         let is_selected = current_channel == Some(channel.id);
 
@@ -162,6 +169,7 @@ impl ChannelList {
                         }
                     }
                 });
+                text_expanded = text_response.fully_open();
             }
 
             ui.add_space(8.0);
@@ -212,7 +220,9 @@ impl ChannelList {
                     self.voice_participants_last_fetch = Some(Instant::now());
                 }
 
-                ui.collapsing("Voice Channels", |ui| {
+                let voice_response = egui::CollapsingHeader::new("Voice Channels")
+                    .default_open(voice_expanded)
+                    .show(ui, |ui| {
                     for channel in voice_channels {
                         // Get participants - from local state if we're in the channel, from cache otherwise
                         let (voice_channel_id, participants, local_speaking) = runtime.block_on(async {
@@ -375,6 +385,7 @@ impl ChannelList {
                         }
                     }
                 });
+                voice_expanded = voice_response.fully_open();
             }
         });
 
@@ -466,6 +477,8 @@ impl ChannelList {
                     }
                 });
         }
+
+        (text_expanded, voice_expanded)
     }
 }
 

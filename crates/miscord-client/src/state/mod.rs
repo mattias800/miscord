@@ -4,4 +4,4 @@ pub mod settings;
 
 pub use app_state::*;
 pub use auth::*;
-pub use settings::{PersistentSettings, Session};
+pub use settings::{PersistentSettings, Session, UiState};
