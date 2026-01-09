@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
-use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -118,9 +117,12 @@ impl SfuClient {
             RTPCodecType::Video,
         )?;
 
-        // Create interceptor registry
-        let mut registry = Registry::new();
-        registry = register_default_interceptors(registry, &mut media_engine)?;
+        // ULTRA LOW LATENCY: Use empty interceptor registry
+        // Default interceptors include NACK (waits for retransmits) and other buffers
+        // For game-streaming-like latency, we skip them entirely
+        // Trade-off: No packet loss recovery, but much lower latency
+        let registry = Registry::new();
+        tracing::info!("Using minimal interceptor registry for ultra-low latency");
 
         // Build API
         let api = APIBuilder::new()
@@ -801,8 +803,15 @@ async fn handle_remote_track(
                 }
             }
             Err(e) => {
-                if e.to_string().contains("closed") {
+                let error_msg = e.to_string();
+                // Track closed - normal shutdown
+                if error_msg.contains("closed") {
                     tracing::info!("Remote {:?} track closed for user {}", track_type, user_id);
+                    break;
+                }
+                // RTPReceiver gone - track was removed (e.g., screen share stopped)
+                if error_msg.contains("RTPReceiver must not be nil") {
+                    tracing::info!("Remote {:?} track ended for user {} (RTPReceiver removed)", track_type, user_id);
                     break;
                 }
                 tracing::warn!("Error reading RTP from remote track: {}", e);

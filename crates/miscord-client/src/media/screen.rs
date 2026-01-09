@@ -252,31 +252,34 @@ impl ScreenCapture {
             .downcast::<gst_app::AppSink>()
             .map_err(|_| anyhow!("Failed to downcast to AppSink"))?;
 
-        // Configure appsink for low latency
+        // Configure appsink for ULTRA LOW LATENCY
         appsink.set_property("emit-signals", true);
         appsink.set_property("sync", false);
-        appsink.set_property("max-buffers", 2u32);
+        appsink.set_property("max-buffers", 1u32);  // Only keep latest frame
         appsink.set_property("drop", true);
 
         // Start the pipeline
         pipeline.set_state(gst::State::Playing)?;
 
-        // Wait for pipeline to start
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Check for errors
-        if let Some(bus) = pipeline.bus() {
-            while let Some(msg) = bus.pop() {
-                use gst::MessageView;
-                if let MessageView::Error(err) = msg.view() {
-                    let _ = pipeline.set_state(gst::State::Null);
-                    return Err(anyhow!(
-                        "GStreamer screen capture error: {} ({:?})",
-                        err.error(),
-                        err.debug()
-                    ));
+        // Wait for pipeline state change (async, no fixed sleep for low latency)
+        let (state_result, _current, _pending) =
+            pipeline.state(gst::ClockTime::from_mseconds(500));
+        if state_result == Err(gst::StateChangeError) {
+            if let Some(bus) = pipeline.bus() {
+                while let Some(msg) = bus.pop() {
+                    use gst::MessageView;
+                    if let MessageView::Error(err) = msg.view() {
+                        let _ = pipeline.set_state(gst::State::Null);
+                        return Err(anyhow!(
+                            "GStreamer screen capture error: {} ({:?})",
+                            err.error(),
+                            err.debug()
+                        ));
+                    }
                 }
             }
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(anyhow!("Screen capture pipeline failed to reach Playing state"));
         }
 
         self.pipeline = Some(pipeline);
@@ -358,6 +361,7 @@ impl ScreenCapture {
     }
 
     /// Get the next captured frame
+    /// Ultra low latency: minimal timeout to avoid blocking
     pub fn get_frame(&self) -> Option<ScreenFrame> {
         if !self.is_running.load(Ordering::SeqCst) {
             return None;
@@ -365,7 +369,8 @@ impl ScreenCapture {
 
         let appsink = self.appsink.as_ref()?;
 
-        match appsink.try_pull_sample(gst::ClockTime::from_mseconds(16)) {
+        // Ultra low latency: very short timeout (5ms) - if no frame ready, return None
+        match appsink.try_pull_sample(gst::ClockTime::from_mseconds(5)) {
             Some(sample) => {
                 let buffer = sample.buffer()?;
                 let caps = sample.caps()?;

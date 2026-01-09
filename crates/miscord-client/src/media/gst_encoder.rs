@@ -105,18 +105,20 @@ fn detect_hw_decoder() -> Result<&'static str> {
 fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
     match encoder {
         "vtenc_h264_hw" | "vtenc_h264" => {
-            // VideoToolbox encoder (macOS)
+            // VideoToolbox encoder (macOS) - ULTRA LOW LATENCY configuration
             // vtenc_h264_hw is hardware-only, vtenc_h264 may fall back to software
             // Low-latency optimizations:
-            // - allow-frame-reordering=false disables B-frames
+            // - allow-frame-reordering=false disables B-frames (critical for low latency)
             // - realtime=true minimizes internal buffering
             // - max-keyframe-interval=30 (1 keyframe per second at 30fps)
+            // - quality=0.5 trades quality for speed (0.0=fastest, 1.0=best)
+            // - max-keyframe-interval-duration=0 ensures keyframes are based on interval not time
             // h264parse config-interval=1 inserts SPS/PPS frequently for quick decoder start
-            // stream-format=byte-stream ensures Annex B output
-            // Note: usage property (VideoChat mode) not available in this GStreamer version
+            // stream-format=byte-stream ensures Annex B output for RTP
             format!(
                 "{} name=encoder realtime=true allow-frame-reordering=false \
-                 max-keyframe-interval=30 bitrate={} ! \
+                 max-keyframe-interval=30 max-keyframe-interval-duration=0 \
+                 quality=0.5 bitrate={} ! \
                  h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au",
                 encoder,
                 bitrate / 1000  // vtenc uses kbps
@@ -176,19 +178,27 @@ fn build_encoder_pipeline(encoder: &str, bitrate: u32) -> String {
 }
 
 /// Build decoder-specific pipeline segment
+/// Configured for ULTRA LOW LATENCY - output frames immediately without reordering
 fn build_decoder_pipeline(decoder: &str) -> String {
     match decoder {
-        "vtdec_hw" | "vtdec" => {
-            // VideoToolbox decoder (macOS)
-            // vtdec_hw is hardware-only, vtdec may fall back to software
+        "vtdec_hw" => {
+            // VideoToolbox hardware-only decoder (macOS)
+            // vtdec_hw doesn't support output-order property, but is already low-latency
+            // Since we encode without B-frames (allow-frame-reordering=false), no reordering needed
             decoder.to_string()
         }
+        "vtdec" => {
+            // VideoToolbox decoder (macOS) - may use software fallback
+            // output-order=decode: Output frames immediately in decode order (not display order)
+            // This eliminates buffering for B-frame reordering (we don't have B-frames anyway)
+            format!("{} output-order=decode", decoder)
+        }
         "nvh264dec" => {
-            // NVIDIA NVDEC
+            // NVIDIA NVDEC - low latency mode
             "nvh264dec".to_string()
         }
         "vaapih264dec" => {
-            // VAAPI decoder
+            // VAAPI decoder - low latency mode
             "vaapih264dec".to_string()
         }
         "d3d11h264dec" => {
@@ -274,23 +284,27 @@ impl GstH264Encoder {
         // Start the pipeline
         pipeline.set_state(gst::State::Playing)?;
 
-        // Wait for pipeline to initialize
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Check for errors
-        if let Some(bus) = pipeline.bus() {
-            while let Some(msg) = bus.pop() {
-                use gst::MessageView;
-                if let MessageView::Error(err) = msg.view() {
-                    let _ = pipeline.set_state(gst::State::Null);
-                    return Err(anyhow!(
-                        "Hardware encoder ({}) failed: {} ({:?})",
-                        encoder,
-                        err.error(),
-                        err.debug()
-                    ));
+        // Wait for pipeline state change (async, no fixed sleep for low latency)
+        let (state_result, _current, _pending) =
+            pipeline.state(gst::ClockTime::from_mseconds(500));
+        if state_result == Err(gst::StateChangeError) {
+            // Check for errors on failure
+            if let Some(bus) = pipeline.bus() {
+                while let Some(msg) = bus.pop() {
+                    use gst::MessageView;
+                    if let MessageView::Error(err) = msg.view() {
+                        let _ = pipeline.set_state(gst::State::Null);
+                        return Err(anyhow!(
+                            "Hardware encoder ({}) failed: {} ({:?})",
+                            encoder,
+                            err.error(),
+                            err.debug()
+                        ));
+                    }
                 }
             }
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(anyhow!("Encoder pipeline failed to reach Playing state"));
         }
 
         // Get reference to the encoder element for force-keyframe support
@@ -367,9 +381,9 @@ impl GstH264Encoder {
 
         self.appsrc.push_buffer(buffer)?;
 
-        // Timeout should be enough for encoder to produce output but not block too long
-        // With realtime=true, encoder should produce output within one frame duration
-        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(33)) {
+        // Ultra-low latency: minimal timeout since hardware encoder is fast
+        // With realtime=true and quality=0.5, encoder should produce output in <5ms
+        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(8)) {
             Some(sample) => {
                 let buffer = sample.buffer().ok_or_else(|| anyhow!("No buffer in sample"))?;
                 let map = buffer.map_readable()?;
@@ -531,24 +545,29 @@ impl GstH264Decoder {
 
         pipeline.set_state(gst::State::Playing)?;
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        if let Some(bus) = pipeline.bus() {
-            while let Some(msg) = bus.pop() {
-                use gst::MessageView;
-                if let MessageView::Error(err) = msg.view() {
-                    let _ = pipeline.set_state(gst::State::Null);
-                    return Err(anyhow!(
-                        "Hardware decoder ({}) failed: {} ({:?})",
-                        decoder,
-                        err.error(),
-                        err.debug()
-                    ));
+        // Wait for pipeline state change (async, no fixed sleep for low latency)
+        let (state_result, _current, _pending) =
+            pipeline.state(gst::ClockTime::from_mseconds(500));
+        if state_result == Err(gst::StateChangeError) {
+            if let Some(bus) = pipeline.bus() {
+                while let Some(msg) = bus.pop() {
+                    use gst::MessageView;
+                    if let MessageView::Error(err) = msg.view() {
+                        let _ = pipeline.set_state(gst::State::Null);
+                        return Err(anyhow!(
+                            "Hardware decoder ({}) failed: {} ({:?})",
+                            decoder,
+                            err.error(),
+                            err.debug()
+                        ));
+                    }
                 }
             }
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(anyhow!("Decoder pipeline failed to reach Playing state"));
         }
 
-        tracing::info!("H.264 hardware decoder ({}) initialized", decoder);
+        tracing::info!("H.264 hardware decoder ({}) initialized - ultra low latency mode", decoder);
 
         Ok(Self {
             pipeline,

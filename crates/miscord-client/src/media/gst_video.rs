@@ -135,7 +135,7 @@ impl GstVideoCapture {
             .downcast::<gst_app::AppSink>()
             .map_err(|_| anyhow!("Failed to downcast to AppSink"))?;
 
-        // Configure appsink properties
+        // Configure appsink for ULTRA LOW LATENCY
         appsink.set_property("emit-signals", true);
         appsink.set_property("sync", false);
         appsink.set_property("max-buffers", 1u32);
@@ -145,29 +145,26 @@ impl GstVideoCapture {
         self.is_running.store(true, Ordering::SeqCst);
         pipeline.set_state(gst::State::Playing)?;
 
-        // Give it a moment to start
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Check for errors
-        if let Some(bus) = pipeline.bus() {
-            while let Some(msg) = bus.pop() {
-                use gst::MessageView;
-                if let MessageView::Error(err) = msg.view() {
-                    let _ = pipeline.set_state(gst::State::Null);
-                    return Err(anyhow!(
-                        "GStreamer error: {} ({:?})",
-                        err.error(),
-                        err.debug()
-                    ));
+        // Wait for pipeline state change (async, no fixed sleep for low latency)
+        let (state_result, _current, _pending) =
+            pipeline.state(gst::ClockTime::from_mseconds(1000));
+        if state_result == Err(gst::StateChangeError) {
+            // Check for errors on failure
+            if let Some(bus) = pipeline.bus() {
+                while let Some(msg) = bus.pop() {
+                    use gst::MessageView;
+                    if let MessageView::Error(err) = msg.view() {
+                        let _ = pipeline.set_state(gst::State::Null);
+                        return Err(anyhow!(
+                            "GStreamer error: {} ({:?})",
+                            err.error(),
+                            err.debug()
+                        ));
+                    }
                 }
             }
-        }
-
-        // Verify pipeline state
-        let (state_result, _current, _pending) =
-            pipeline.state(gst::ClockTime::from_seconds(2));
-        if state_result == Err(gst::StateChangeError) {
-            return Err(anyhow!("Pipeline failed to reach Playing state"));
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(anyhow!("Video capture pipeline failed to reach Playing state"));
         }
 
         tracing::info!("GStreamer video capture started successfully");
@@ -180,8 +177,8 @@ impl GstVideoCapture {
     pub fn get_frame(&self) -> Option<VideoFrame> {
         let appsink = self.appsink.as_ref()?;
 
-        // Try to pull a sample with a small timeout
-        let sample = match appsink.try_pull_sample(gst::ClockTime::from_mseconds(16)) {
+        // Ultra low latency: very short timeout (5ms) - if no frame ready, return None
+        let sample = match appsink.try_pull_sample(gst::ClockTime::from_mseconds(5)) {
             Some(s) => s,
             None => {
                 // Check if EOS
