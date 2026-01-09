@@ -29,7 +29,22 @@ impl MiscordApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Set up Discord-like dark theme
         let mut style = (*cc.egui_ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+
+        // Increase global font sizes for better readability
+        use egui::{FontId, TextStyle};
+        style.text_styles = [
+            (TextStyle::Small, FontId::proportional(13.0)),
+            (TextStyle::Body, FontId::proportional(15.0)),
+            (TextStyle::Button, FontId::proportional(15.0)),
+            (TextStyle::Heading, FontId::proportional(20.0)),
+            (TextStyle::Monospace, FontId::monospace(14.0)),
+        ].into();
+
+        // Better spacing
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        style.spacing.window_margin = egui::Margin::same(12.0);
+        style.spacing.indent = 18.0;
 
         // Apply Discord colors to visuals
         let visuals = &mut style.visuals;
@@ -39,17 +54,21 @@ impl MiscordApp {
         visuals.extreme_bg_color = theme::BG_TERTIARY;
         visuals.faint_bg_color = theme::BG_ACCENT;
 
-        // Widget styling
+        // Widget styling with better rounding
         visuals.widgets.noninteractive.bg_fill = theme::BG_PRIMARY;
-        visuals.widgets.inactive.bg_fill = theme::BG_PRIMARY;
-        visuals.widgets.hovered.bg_fill = theme::BG_ACCENT;
+        visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+        visuals.widgets.inactive.bg_fill = theme::BG_ACCENT;
+        visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+        visuals.widgets.hovered.bg_fill = theme::BG_ELEVATED;
+        visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
         visuals.widgets.active.bg_fill = theme::BLURPLE;
+        visuals.widgets.active.rounding = egui::Rounding::same(4.0);
 
         // Text colors
         visuals.widgets.noninteractive.fg_stroke.color = theme::TEXT_NORMAL;
-        visuals.widgets.inactive.fg_stroke.color = theme::TEXT_MUTED;
+        visuals.widgets.inactive.fg_stroke.color = theme::TEXT_NORMAL;
         visuals.widgets.hovered.fg_stroke.color = theme::TEXT_NORMAL;
-        visuals.widgets.active.fg_stroke.color = theme::TEXT_NORMAL;
+        visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
 
         // Selection color
         visuals.selection.bg_fill = theme::BLURPLE;

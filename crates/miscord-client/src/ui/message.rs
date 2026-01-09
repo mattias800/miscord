@@ -8,8 +8,12 @@ use crate::network::NetworkClient;
 use crate::state::AppState;
 use miscord_protocol::MessageData;
 
-/// Common reaction emojis
-pub const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🎉"];
+/// Common reaction emojis - using simpler Unicode that renders well
+pub const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😄", "😮", "😢", "🎉"];
+
+/// Reaction button colors - deeper, richer palette
+const REACTION_BG_INACTIVE: egui::Color32 = egui::Color32::from_rgb(45, 48, 54);
+const REACTION_BG_ACTIVE: egui::Color32 = egui::Color32::from_rgb(62, 72, 186);  // Deep blue
 
 /// Format a timestamp as relative time ("Just now", "2m ago", etc.)
 pub fn format_relative_time(timestamp: DateTime<Utc>) -> String {
@@ -119,11 +123,11 @@ pub fn render_message(
 
     // Message header: author name, timestamp, and action buttons
     ui.horizontal(|ui| {
-        // Author name
+        // Author name - using theme brand color
         ui.label(
             egui::RichText::new(&message.author_name)
                 .strong()
-                .color(egui::Color32::from_rgb(88, 101, 242)),
+                .color(egui::Color32::from_rgb(96, 165, 250)),  // Softer blue for names
         );
 
         // Timestamp
@@ -144,53 +148,59 @@ pub fn render_message(
             );
         }
 
-        // Action buttons - shown inline with small separator
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("|")
-                .small()
-                .color(egui::Color32::from_rgb(80, 80, 80)),
-        );
-        ui.add_space(4.0);
+        // Action buttons - subtle icons that appear on hover
+        ui.add_space(12.0);
+        ui.spacing_mut().item_spacing.x = 2.0;
+
+        // Helper to create action buttons with consistent styling
+        let action_btn = |ui: &mut egui::Ui, icon: &str, tooltip: &str| -> egui::Response {
+            let btn = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(icon)
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(180, 180, 180))
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .min_size(egui::vec2(28.0, 24.0))
+                .rounding(egui::Rounding::same(4.0))
+            );
+            btn.on_hover_text(tooltip)
+        };
 
         // Reply button
         if options.show_reply_button {
-            let reply_btn = ui.small_button("↩");
+            let reply_btn = action_btn(ui, "↩", "Reply");
             if reply_btn.clicked() {
                 action = Some(MessageAction::Reply(message.clone()));
             }
-            reply_btn.on_hover_text("Reply");
         }
 
         // React button
-        let react_btn = ui.small_button("+");
+        let react_btn = action_btn(ui, "😀", "Add reaction");
         if react_btn.clicked() {
             should_toggle_picker = true;
         }
         react_btn_rect = Some(react_btn.rect);
-        react_btn.on_hover_text("Add reaction");
 
         // Thread button (only show if message doesn't have replies and option enabled)
         if options.show_thread_button && message.reply_count == 0 {
-            let thread_btn = ui.small_button("🧵");
+            let thread_btn = action_btn(ui, "💬", "Start thread");
             if thread_btn.clicked() {
                 action = Some(MessageAction::OpenThread(message.id));
             }
-            thread_btn.on_hover_text("Start thread");
         }
 
         // Edit button (only for own messages)
         if is_own_message {
-            let edit_btn = ui.small_button("✏");
+            let edit_btn = action_btn(ui, "✎", "Edit");
             if edit_btn.clicked() {
                 action = Some(MessageAction::Edit(message.clone()));
             }
-            edit_btn.on_hover_text("Edit");
         }
 
         // Delete button (only for own messages)
         if is_own_message {
-            let del_btn = ui.small_button("🗑");
+            let del_btn = action_btn(ui, "✕", "Delete");
             if del_btn.clicked() {
                 let network = network.clone();
                 let msg_id = message.id;
@@ -221,13 +231,25 @@ pub fn render_message(
 
             egui::Area::new(popup_id)
                 .order(egui::Order::Foreground)
-                .fixed_pos(egui::pos2(btn_rect.left(), btn_rect.bottom() + 2.0))
+                .fixed_pos(egui::pos2(btn_rect.left(), btn_rect.bottom() + 4.0))
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style())
+                        .inner_margin(egui::Margin::same(8.0))
+                        .rounding(egui::Rounding::same(8.0))
+                        .fill(egui::Color32::from_rgb(30, 32, 36))  // BG_PRIMARY
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
                                 for emoji in REACTION_EMOJIS {
-                                    if ui.button(*emoji).clicked() {
+                                    let btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(*emoji).size(20.0)
+                                        )
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .min_size(egui::vec2(36.0, 36.0))
+                                        .rounding(egui::Rounding::same(6.0))
+                                    );
+                                    if btn.clicked() {
                                         let network = network.clone();
                                         let msg_id = message.id;
                                         let emoji_str = emoji.to_string();
@@ -261,23 +283,31 @@ pub fn render_message(
     if has_reactions {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
 
             if let Some(reaction_list) = reactions {
                 // Use reactions from state (real-time updates)
                 for (emoji, count, i_reacted) in reaction_list {
                     let reaction_text = format!("{} {}", emoji, count);
                     let fill_color = if *i_reacted {
-                        egui::Color32::from_rgb(88, 101, 242)
+                        REACTION_BG_ACTIVE
                     } else {
-                        egui::Color32::from_rgb(50, 50, 60)
+                        REACTION_BG_INACTIVE
+                    };
+                    let text_color = if *i_reacted {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(220, 221, 222)
                     };
                     let btn = ui.add(
                         egui::Button::new(
-                            egui::RichText::new(reaction_text).small()
+                            egui::RichText::new(reaction_text)
+                                .size(14.0)
+                                .color(text_color)
                         )
-                        .small()
                         .fill(fill_color)
-                        .rounding(egui::Rounding::same(12.0))
+                        .rounding(egui::Rounding::same(6.0))
+                        .min_size(egui::vec2(0.0, 28.0))
                     );
                     if btn.clicked() {
                         let network = network.clone();
@@ -302,17 +332,24 @@ pub fn render_message(
                 for reaction in &message.reactions {
                     let reaction_text = format!("{} {}", reaction.emoji, reaction.count());
                     let fill_color = if reaction.reacted_by_me {
-                        egui::Color32::from_rgb(88, 101, 242)
+                        REACTION_BG_ACTIVE
                     } else {
-                        egui::Color32::from_rgb(50, 50, 60)
+                        REACTION_BG_INACTIVE
+                    };
+                    let text_color = if reaction.reacted_by_me {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(220, 221, 222)
                     };
                     let btn = ui.add(
                         egui::Button::new(
-                            egui::RichText::new(reaction_text).small()
+                            egui::RichText::new(reaction_text)
+                                .size(14.0)
+                                .color(text_color)
                         )
-                        .small()
                         .fill(fill_color)
-                        .rounding(egui::Rounding::same(12.0))
+                        .rounding(egui::Rounding::same(6.0))
+                        .min_size(egui::vec2(0.0, 28.0))
                     );
                     if btn.clicked() {
                         let network = network.clone();
@@ -353,12 +390,13 @@ pub fn render_message(
 
             let thread_link = ui.add(
                 egui::Button::new(
-                    egui::RichText::new(format!("🧵 {} · View thread", reply_text))
-                        .small()
-                        .color(egui::Color32::from_rgb(88, 101, 242))
+                    egui::RichText::new(format!("💬 {} · View thread", reply_text))
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(96, 165, 250))  // Softer blue
                 )
-                .fill(egui::Color32::from_rgb(45, 45, 55))
-                .rounding(egui::Rounding::same(4.0))
+                .fill(egui::Color32::from_rgb(38, 40, 46))  // BG_ELEVATED
+                .rounding(egui::Rounding::same(6.0))
+                .min_size(egui::vec2(0.0, 28.0))
             );
 
             if thread_link.hovered() {
@@ -370,10 +408,11 @@ pub fn render_message(
             }
 
             if !time_text.is_empty() {
+                ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(format!("Last reply {}", time_text))
-                        .small()
-                        .color(egui::Color32::from_rgb(140, 140, 140))
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 150, 150))
                 );
             }
         });

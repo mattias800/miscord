@@ -123,15 +123,35 @@ impl ChannelList {
                 .collect();
 
             if !text_channels.is_empty() {
-                let text_response = egui::CollapsingHeader::new("Text Channels")
+                let text_response = egui::CollapsingHeader::new(
+                    egui::RichText::new("TEXT CHANNELS")
+                        .size(11.0)
+                        .color(theme::TEXT_MUTED)
+                )
                     .default_open(text_expanded)
                     .show(ui, |ui| {
                     for channel in text_channels {
                         let is_selected = current_channel == Some(channel.id);
 
-                        let response = ui.selectable_label(
-                            is_selected,
-                            format!("# {}", channel.name),
+                        let text_color = if is_selected {
+                            theme::TEXT_NORMAL
+                        } else {
+                            theme::TEXT_MUTED
+                        };
+
+                        let response = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("# {}", channel.name))
+                                    .size(15.0)
+                                    .color(text_color)
+                            )
+                            .fill(if is_selected {
+                                theme::BG_ACCENT
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .rounding(egui::Rounding::same(4.0))
+                            .min_size(egui::vec2(ui.available_width(), 32.0))
                         );
 
                         if response.clicked() {
@@ -220,7 +240,11 @@ impl ChannelList {
                     self.voice_participants_last_fetch = Some(Instant::now());
                 }
 
-                let voice_response = egui::CollapsingHeader::new("Voice Channels")
+                let voice_response = egui::CollapsingHeader::new(
+                    egui::RichText::new("VOICE CHANNELS")
+                        .size(11.0)
+                        .color(theme::TEXT_MUTED)
+                )
                     .default_open(voice_expanded)
                     .show(ui, |ui| {
                     for channel in voice_channels {
@@ -250,9 +274,26 @@ impl ChannelList {
 
                         let is_connected = voice_channel_id == Some(channel.id);
 
-                        let response = ui.horizontal(|ui| {
-                            ui.selectable_label(is_connected, format!("🔊 {}", channel.name))
-                        }).inner;
+                        let text_color = if is_connected {
+                            theme::GREEN
+                        } else {
+                            theme::TEXT_MUTED
+                        };
+
+                        let response = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("🔊 {}", channel.name))
+                                    .size(15.0)
+                                    .color(text_color)
+                            )
+                            .fill(if is_connected {
+                                theme::BG_ACCENT
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .rounding(egui::Rounding::same(4.0))
+                            .min_size(egui::vec2(ui.available_width(), 32.0))
+                        );
 
                         if response.clicked() {
                             let state = state.clone();
@@ -311,9 +352,9 @@ impl ChannelList {
 
                             for participant in &participants {
                                 ui.horizontal(|ui| {
-                                    ui.add_space(20.0); // Indent
+                                    ui.add_space(24.0); // Indent
 
-                                    // Small avatar circle with initial
+                                    // Avatar circle with initial
                                     let initial = participant.username
                                         .chars()
                                         .next()
@@ -322,20 +363,20 @@ impl ChannelList {
                                         .to_string();
 
                                     let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(16.0, 16.0),
+                                        egui::vec2(24.0, 24.0),
                                         egui::Sense::hover(),
                                     );
                                     let painter = ui.painter_at(rect);
-                                    painter.circle_filled(rect.center(), 8.0, theme::BG_ACCENT);
+                                    painter.circle_filled(rect.center(), 12.0, theme::BG_ACCENT);
                                     painter.text(
                                         rect.center(),
                                         egui::Align2::CENTER_CENTER,
                                         &initial,
-                                        egui::FontId::proportional(9.0),
+                                        egui::FontId::proportional(12.0),
                                         theme::TEXT_NORMAL,
                                     );
 
-                                    ui.add_space(4.0);
+                                    ui.add_space(8.0);
 
                                     // Check if this participant is speaking
                                     let is_self = current_user_id == Some(participant.user_id);
@@ -347,7 +388,7 @@ impl ChannelList {
 
                                     // Username - bright white when speaking, muted when silent
                                     let name_color = if is_speaking {
-                                        theme::TEXT_NORMAL
+                                        theme::GREEN
                                     } else {
                                         theme::TEXT_MUTED
                                     };
@@ -355,32 +396,34 @@ impl ChannelList {
                                     ui.label(
                                         egui::RichText::new(&participant.username)
                                             .color(name_color)
-                                            .size(12.0),
+                                            .size(14.0),
                                     );
 
                                     // Status icons
+                                    ui.add_space(4.0);
                                     if participant.is_muted {
                                         ui.label(
                                             egui::RichText::new("🔇")
-                                                .size(10.0)
+                                                .size(12.0)
                                                 .color(theme::TEXT_MUTED),
                                         );
                                     }
                                     if participant.is_video_enabled {
                                         ui.label(
                                             egui::RichText::new("📹")
-                                                .size(10.0)
+                                                .size(12.0)
                                                 .color(theme::TEXT_MUTED),
                                         );
                                     }
                                     if participant.is_screen_sharing {
                                         ui.label(
                                             egui::RichText::new("🖥")
-                                                .size(10.0)
+                                                .size(12.0)
                                                 .color(theme::TEXT_MUTED),
                                         );
                                     }
                                 });
+                                ui.add_space(2.0);
                             }
                         }
                     }
