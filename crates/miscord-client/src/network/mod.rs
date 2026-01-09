@@ -258,19 +258,56 @@ impl NetworkClient {
     }
 
     pub async fn send_message(&self, channel_id: Uuid, content: &str) -> Result<MessageData> {
+        self.send_message_with_reply(channel_id, content, None).await
+    }
+
+    pub async fn send_message_with_reply(&self, channel_id: Uuid, content: &str, reply_to_id: Option<Uuid>) -> Result<MessageData> {
         let server_url = self.get_server_url().await;
         let token = self.get_token().await;
 
         #[derive(serde::Serialize)]
         struct CreateMessage {
             content: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_to_id: Option<Uuid>,
         }
 
         api::post(
             &format!("{}/api/channels/{}/messages", server_url, channel_id),
             &CreateMessage {
                 content: content.to_string(),
+                reply_to_id,
             },
+            token.as_deref(),
+        )
+        .await
+    }
+
+    pub async fn update_message(&self, message_id: Uuid, content: &str) -> Result<MessageData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        #[derive(serde::Serialize)]
+        struct UpdateMessage {
+            content: String,
+        }
+
+        api::patch(
+            &format!("{}/api/messages/{}", server_url, message_id),
+            &UpdateMessage {
+                content: content.to_string(),
+            },
+            token.as_deref(),
+        )
+        .await
+    }
+
+    pub async fn delete_message(&self, message_id: Uuid) -> Result<()> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::delete(
+            &format!("{}/api/messages/{}", server_url, message_id),
             token.as_deref(),
         )
         .await
