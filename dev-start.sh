@@ -63,9 +63,10 @@ cleanup_existing() {
 cleanup() {
     echo ""
     echo -e "${YELLOW}Shutting down...${NC}"
-    [ -n "$CLIENT1_PID" ] && kill $CLIENT1_PID 2>/dev/null
-    [ -n "$CLIENT2_PID" ] && kill $CLIENT2_PID 2>/dev/null
-    [ -n "$SERVER_PID" ] && kill $SERVER_PID 2>/dev/null
+    [ -n "$CLIENT1_PID" ] && kill -9 $CLIENT1_PID 2>/dev/null || true
+    [ -n "$CLIENT2_PID" ] && kill -9 $CLIENT2_PID 2>/dev/null || true
+    [ -n "$SERVER_PID" ] && kill -9 $SERVER_PID 2>/dev/null || true
+    wait 2>/dev/null || true
     echo -e "${GREEN}All processes stopped.${NC}"
     exit 0
 }
