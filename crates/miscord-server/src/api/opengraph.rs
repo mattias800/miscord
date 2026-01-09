@@ -134,12 +134,15 @@ pub async fn fetch_opengraph(
     // Fallback to meta description if no og:description
     let description = og_description.or(meta_description);
 
+    // Fallback to domain name if no og:site_name
+    let site_name = og_site_name.or_else(|| extract_domain(url));
+
     Ok(Json(OpenGraphData {
         url: url.clone(),
         title: title.map(decode_html_entities),
         description: description.map(decode_html_entities),
         image: og_image.map(decode_html_entities),
-        site_name: og_site_name.map(decode_html_entities),
+        site_name: site_name.map(decode_html_entities),
     }))
 }
 
@@ -156,4 +159,15 @@ fn decode_html_entities(s: String) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&apos;", "'")
+}
+
+/// Extract domain from URL (e.g., "https://www.example.com/path" -> "www.example.com")
+fn extract_domain(url: &str) -> Option<String> {
+    let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let domain = url.split('/').next()?;
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain.to_string())
+    }
 }
