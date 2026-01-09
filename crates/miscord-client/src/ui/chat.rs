@@ -409,42 +409,63 @@ impl ChatView {
                     }
                 });
 
-                // Show mention autocomplete dropdown
+                // Show mention autocomplete dropdown as floating popup above the input
                 if self.mention_active && !matching_members.is_empty() {
-                    egui::Frame::none()
-                        .fill(super::theme::BG_ELEVATED)
-                        .rounding(4.0)
-                        .inner_margin(4.0)
-                        .show(ui, |ui| {
-                            for (i, (_, username, display_name)) in matching_members.iter().enumerate() {
-                                let is_selected = i == self.mention_selected;
-                                let text = if username != display_name {
-                                    format!("{} ({})", display_name, username)
-                                } else {
-                                    display_name.clone()
-                                };
+                    // Calculate position - above the input panel
+                    let input_rect = ui.min_rect();
+                    let dropdown_height = (matching_members.len() as f32 * 32.0) + 8.0;
+                    let dropdown_pos = egui::pos2(
+                        input_rect.left() + 8.0,
+                        input_rect.top() - dropdown_height - 4.0,
+                    );
 
-                                let response = ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new(&text)
-                                            .color(if is_selected {
-                                                super::theme::TEXT_BRIGHT
+                    egui::Area::new(egui::Id::new("mention_dropdown"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(dropdown_pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::none()
+                                .fill(super::theme::BG_ELEVATED)
+                                .rounding(4.0)
+                                .inner_margin(4.0)
+                                .stroke(egui::Stroke::new(1.0, super::theme::BG_ACCENT))
+                                .shadow(egui::epaint::Shadow {
+                                    offset: egui::vec2(0.0, 2.0),
+                                    blur: 8.0,
+                                    spread: 0.0,
+                                    color: egui::Color32::from_black_alpha(60),
+                                })
+                                .show(ui, |ui| {
+                                    ui.set_min_width(250.0);
+                                    for (i, (_, username, display_name)) in matching_members.iter().enumerate() {
+                                        let is_selected = i == self.mention_selected;
+                                        let text = if username != display_name {
+                                            format!("{} ({})", display_name, username)
+                                        } else {
+                                            display_name.clone()
+                                        };
+
+                                        let response = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new(&text)
+                                                    .color(if is_selected {
+                                                        super::theme::TEXT_BRIGHT
+                                                    } else {
+                                                        super::theme::TEXT_NORMAL
+                                                    })
+                                            )
+                                            .fill(if is_selected {
+                                                super::theme::BG_ACCENT
                                             } else {
-                                                super::theme::TEXT_NORMAL
+                                                egui::Color32::TRANSPARENT
                                             })
-                                    )
-                                    .fill(if is_selected {
-                                        super::theme::BG_ACCENT
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    })
-                                    .min_size(egui::vec2(ui.available_width(), 28.0))
-                                );
+                                            .min_size(egui::vec2(242.0, 28.0))
+                                        );
 
-                                if response.clicked() {
-                                    self.insert_mention(username);
-                                }
-                            }
+                                        if response.clicked() {
+                                            self.insert_mention(username);
+                                        }
+                                    }
+                                });
                         });
                 }
 
