@@ -308,6 +308,57 @@ impl ChatView {
 
                 ui.add_space(4.0);
 
+                // Update mention state before handling keys
+                self.update_mention_state();
+
+                // Build matching members list for mention autocomplete
+                let matching_members: Vec<_> = if self.mention_active {
+                    let query_lower = self.mention_query.to_lowercase();
+                    members
+                        .iter()
+                        .filter(|(_, username, display_name)| {
+                            query_lower.is_empty()
+                                || username.to_lowercase().contains(&query_lower)
+                                || display_name.to_lowercase().contains(&query_lower)
+                        })
+                        .take(5)
+                        .cloned()
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                // Handle mention keyboard navigation BEFORE text input
+                // This way we can intercept the keys
+                let mut mention_handled = false;
+                if self.mention_active && !matching_members.is_empty() {
+                    let up = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+                    let down = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+                    let tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                    let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    let escape = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+
+                    if up && self.mention_selected > 0 {
+                        self.mention_selected -= 1;
+                        mention_handled = true;
+                    }
+                    if down && self.mention_selected < matching_members.len().saturating_sub(1) {
+                        self.mention_selected += 1;
+                        mention_handled = true;
+                    }
+                    if (tab || enter) && !matching_members.is_empty() {
+                        let (_, username, _) = &matching_members[self.mention_selected];
+                        self.insert_mention(username);
+                        mention_handled = true;
+                    }
+                    if escape {
+                        self.mention_active = false;
+                        self.mention_query.clear();
+                        self.mention_selected = 0;
+                        mention_handled = true;
+                    }
+                }
+
                 // Message input
                 ui.horizontal(|ui| {
                     let hint_text = if self.editing_message.is_some() {
@@ -325,7 +376,8 @@ impl ChatView {
                     );
 
                     // Handle Enter (send) vs Shift+Enter (new line)
-                    if response.has_focus() {
+                    // Only if mention autocomplete didn't handle it
+                    if response.has_focus() && !mention_handled {
                         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let shift_held = ui.input(|i| i.modifiers.shift);
 
@@ -343,74 +395,43 @@ impl ChatView {
                     }
                 });
 
-                // Mention autocomplete detection
-                self.update_mention_state();
-
                 // Show mention autocomplete dropdown
-                if self.mention_active && !members.is_empty() {
-                    let query_lower = self.mention_query.to_lowercase();
-                    let matching_members: Vec<_> = members
-                        .iter()
-                        .filter(|(_, username, display_name)| {
-                            username.to_lowercase().contains(&query_lower)
-                                || display_name.to_lowercase().contains(&query_lower)
-                        })
-                        .take(5)
-                        .collect();
+                if self.mention_active && !matching_members.is_empty() {
+                    egui::Frame::none()
+                        .fill(super::theme::BG_ELEVATED)
+                        .rounding(4.0)
+                        .inner_margin(4.0)
+                        .show(ui, |ui| {
+                            for (i, (_, username, display_name)) in matching_members.iter().enumerate() {
+                                let is_selected = i == self.mention_selected;
+                                let text = if username != display_name {
+                                    format!("{} ({})", display_name, username)
+                                } else {
+                                    display_name.clone()
+                                };
 
-                    if !matching_members.is_empty() {
-                        egui::Frame::none()
-                            .fill(super::theme::BG_ELEVATED)
-                            .rounding(4.0)
-                            .inner_margin(4.0)
-                            .show(ui, |ui| {
-                                for (i, (_, username, display_name)) in matching_members.iter().enumerate() {
-                                    let is_selected = i == self.mention_selected;
-                                    let text = if username != display_name {
-                                        format!("{} ({})", display_name, username)
+                                let response = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(&text)
+                                            .color(if is_selected {
+                                                super::theme::TEXT_BRIGHT
+                                            } else {
+                                                super::theme::TEXT_NORMAL
+                                            })
+                                    )
+                                    .fill(if is_selected {
+                                        super::theme::BG_ACCENT
                                     } else {
-                                        display_name.clone()
-                                    };
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .min_size(egui::vec2(ui.available_width(), 28.0))
+                                );
 
-                                    let response = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new(&text)
-                                                .color(if is_selected {
-                                                    super::theme::TEXT_BRIGHT
-                                                } else {
-                                                    super::theme::TEXT_NORMAL
-                                                })
-                                        )
-                                        .fill(if is_selected {
-                                            super::theme::BG_ACCENT
-                                        } else {
-                                            egui::Color32::TRANSPARENT
-                                        })
-                                        .min_size(egui::vec2(ui.available_width(), 28.0))
-                                    );
-
-                                    if response.clicked() {
-                                        self.insert_mention(username);
-                                    }
+                                if response.clicked() {
+                                    self.insert_mention(username);
                                 }
-                            });
-
-                        // Handle keyboard navigation
-                        let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
-                        let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
-                        let tab = ui.input(|i| i.key_pressed(egui::Key::Tab));
-
-                        if up && self.mention_selected > 0 {
-                            self.mention_selected -= 1;
-                        }
-                        if down && self.mention_selected < matching_members.len().saturating_sub(1) {
-                            self.mention_selected += 1;
-                        }
-                        if tab && !matching_members.is_empty() {
-                            let (_, username, _) = matching_members[self.mention_selected];
-                            self.insert_mention(username);
-                        }
-                    }
+                            }
+                        });
                 }
 
                 ui.add_space(4.0);
