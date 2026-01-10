@@ -14,6 +14,7 @@ mod screen_picker;
 mod thread_panel;
 mod quick_switcher;
 mod message_search;
+mod gif_picker;
 pub mod theme;
 
 pub use app::MiscordApp;

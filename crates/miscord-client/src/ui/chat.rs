@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::network::NetworkClient;
 use crate::state::AppState;
-use miscord_protocol::{AttachmentData, MessageData};
+use miscord_protocol::MessageData;
 
+use super::gif_picker::GifPicker;
 use super::message::{
     format_file_size, format_relative_time, render_lightbox, render_message, MessageAction,
     MessageRenderOptions, MessageRendererState, ReactionInfo,
@@ -69,6 +70,8 @@ pub struct ChatView {
     pinned_messages: Vec<MessageData>,
     /// Whether we're loading pinned messages
     pinned_messages_loading: bool,
+    /// GIF picker state
+    gif_picker: GifPicker,
 }
 
 /// Get date separator text for a message
@@ -120,6 +123,7 @@ impl ChatView {
             show_pinned_panel: false,
             pinned_messages: Vec::new(),
             pinned_messages_loading: false,
+            gif_picker: GifPicker::new(),
         }
     }
 
@@ -446,6 +450,17 @@ impl ChatView {
                     ).on_hover_text("Insert link [text](url)").clicked() {
                         self.insert_formatting("[", "](url)");
                     }
+
+                    ui.separator();
+
+                    // GIF button
+                    let gif_button = ui.add(
+                        egui::Button::new(egui::RichText::new("GIF").size(12.0))
+                            .min_size(egui::vec2(36.0, 24.0))
+                    ).on_hover_text("Search GIFs");
+                    if gif_button.clicked() {
+                        self.gif_picker.toggle();
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -690,6 +705,25 @@ impl ChatView {
                                     }
                                 });
                         });
+                }
+
+                // GIF picker popup (above input)
+                if self.gif_picker.is_open() {
+                    let input_rect = input_row_response.response.rect;
+                    if let Some(gif_url) = self.gif_picker.show(
+                        ui.ctx(),
+                        input_rect,
+                        network,
+                        state,
+                        runtime,
+                    ) {
+                        // Insert selected GIF URL into message
+                        if !self.message_input.is_empty() && !self.message_input.ends_with(' ') && !self.message_input.ends_with('\n') {
+                            self.message_input.push(' ');
+                        }
+                        self.message_input.push_str(&gif_url);
+                        self.gif_picker.close();
+                    }
                 }
 
                 ui.add_space(4.0);

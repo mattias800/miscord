@@ -776,6 +776,37 @@ impl NetworkClient {
     pub async fn get_base_url(&self) -> String {
         self.get_server_url().await
     }
+
+    // GIF Search
+
+    /// Search for GIFs by query
+    pub async fn search_gifs(&self, query: &str, limit: u32) -> Result<GifSearchResponse> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::get(
+            &format!(
+                "{}/api/gifs/search?q={}&limit={}",
+                server_url,
+                urlencoding::encode(query),
+                limit
+            ),
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Get trending/featured GIFs
+    pub async fn get_trending_gifs(&self, limit: u32) -> Result<GifSearchResponse> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::get(
+            &format!("{}/api/gifs/trending?limit={}", server_url, limit),
+            token.as_deref(),
+        )
+        .await
+    }
 }
 
 /// ICE server configuration for WebRTC
@@ -798,4 +829,37 @@ pub struct OpenGraphData {
     pub video_type: Option<String>,
     /// Channel/author name for videos
     pub author_name: Option<String>,
+}
+
+/// A single GIF result from Tenor
+#[derive(Debug, Clone, Deserialize)]
+pub struct TenorGif {
+    pub id: String,
+    pub title: String,
+    pub media_formats: TenorMediaFormats,
+    #[serde(default)]
+    pub content_description: String,
+}
+
+/// Available media formats for a GIF
+#[derive(Debug, Clone, Deserialize)]
+pub struct TenorMediaFormats {
+    pub gif: Option<TenorMedia>,
+    pub tinygif: Option<TenorMedia>,
+    pub nanogif: Option<TenorMedia>,
+}
+
+/// A single media format with URL and dimensions
+#[derive(Debug, Clone, Deserialize)]
+pub struct TenorMedia {
+    pub url: String,
+    #[serde(default)]
+    pub dims: Vec<u32>,
+}
+
+/// Response from GIF search endpoints
+#[derive(Debug, Clone, Deserialize)]
+pub struct GifSearchResponse {
+    pub results: Vec<TenorGif>,
+    pub next: Option<String>,
 }

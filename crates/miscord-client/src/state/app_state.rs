@@ -132,6 +132,10 @@ pub struct AppStateInner {
 
     // Draft messages (channel_id -> draft text)
     pub drafts: HashMap<Uuid, String>,
+
+    // GIF picker state
+    pub gif_search_results: Option<Vec<crate::network::TenorGif>>,
+    pub gif_search_error: Option<String>,
 }
 
 impl Default for AppStateInner {
@@ -186,6 +190,8 @@ impl Default for AppStateInner {
             recent_channel_ids: Vec::new(),
             scroll_to_message_id: None,
             drafts: HashMap::new(),
+            gif_search_results: None,
+            gif_search_error: None,
         }
     }
 }
@@ -855,6 +861,34 @@ impl AppState {
     /// Synchronous version of has_draft for UI rendering
     pub fn has_draft_sync(&self, channel_id: Uuid) -> bool {
         self.inner.try_read().ok().map(|s| s.drafts.contains_key(&channel_id)).unwrap_or(false)
+    }
+
+    // GIF picker methods
+
+    /// Set GIF search results from Tenor API
+    pub async fn set_gif_search_results(&self, results: Vec<crate::network::TenorGif>) {
+        let mut state = self.inner.write().await;
+        state.gif_search_results = Some(results);
+        state.gif_search_error = None;
+    }
+
+    /// Set GIF search error
+    pub async fn set_gif_search_error(&self, error: String) {
+        let mut state = self.inner.write().await;
+        state.gif_search_error = Some(error);
+        state.gif_search_results = Some(Vec::new());
+    }
+
+    /// Get and clear GIF search results (returns results and error, if any)
+    pub async fn get_gif_search_results(&self) -> Option<(Vec<crate::network::TenorGif>, Option<String>)> {
+        let mut state = self.inner.write().await;
+        if state.gif_search_results.is_some() {
+            let results = state.gif_search_results.take().unwrap_or_default();
+            let error = state.gif_search_error.take();
+            Some((results, error))
+        } else {
+            None
+        }
     }
 }
 

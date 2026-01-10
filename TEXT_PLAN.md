@@ -147,11 +147,11 @@ Lower priority enhancements:
 - [ ] Server acknowledgment on receive
 
 #### 4.2 GIF Support ✅
-- [ ] Integration with Tenor API (server-side proxy to hide API key)
-- [ ] Picker UI in message composer (popup with search and trending GIFs)
-- [ ] GIF search and trending endpoints
-- [ ] Inline GIF display (detects Tenor URLs, renders inline)
-- [ ] Image caching for performance
+- [x] Integration with Tenor API (server-side proxy to hide API key)
+- [x] Picker UI in message composer (popup with search and trending GIFs)
+- [x] GIF search and trending endpoints
+- [x] Inline GIF display (GIF URLs render as images via existing system)
+- [x] Image caching for performance (uses existing image cache)
 - [ ] Sticker packs (future enhancement)
 
 #### 4.3 Voice/Video Calls in DMs

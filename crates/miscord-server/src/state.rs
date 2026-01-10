@@ -17,6 +17,7 @@ pub struct Config {
     pub turn_servers: Vec<TurnServer>,
     pub upload_dir: PathBuf,
     pub base_url: String,
+    pub tenor_api_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -51,6 +52,11 @@ impl Config {
         let base_url = std::env::var("BASE_URL")
             .unwrap_or_else(|_| format!("http://{}", bind_address));
 
+        let tenor_api_key = std::env::var("TENOR_API_KEY").ok();
+        if tenor_api_key.is_none() {
+            tracing::info!("TENOR_API_KEY not set, GIF search will be disabled");
+        }
+
         Ok(Config {
             bind_address,
             database_url,
@@ -59,6 +65,7 @@ impl Config {
             turn_servers: vec![], // Configure via env if needed
             upload_dir,
             base_url,
+            tenor_api_key,
         })
     }
 }

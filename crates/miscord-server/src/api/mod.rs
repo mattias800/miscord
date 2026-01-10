@@ -4,6 +4,7 @@ mod channels;
 mod communities;
 mod messages;
 mod opengraph;
+mod tenor;
 mod users;
 
 use crate::state::AppState;
@@ -92,6 +93,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/channels/{id}/unread", get(channels::get_unread_count))
         // OpenGraph metadata endpoint
         .route("/api/opengraph", get(opengraph::fetch_opengraph))
+        // GIF search endpoints (Tenor API proxy)
+        .route("/api/gifs/search", get(tenor::search_gifs))
+        .route("/api/gifs/trending", get(tenor::trending_gifs))
         // Message search
         .route("/api/messages/search", get(messages::search_messages))
         // Pinned messages routes
