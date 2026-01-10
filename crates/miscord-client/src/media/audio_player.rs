@@ -22,6 +22,8 @@ pub struct AudioPlayerState {
     pub duration_ms: u64,
     /// Volume (0.0 to 1.0)
     pub volume: Arc<std::sync::atomic::AtomicU32>,
+    /// Generation counter to invalidate old position tracking threads
+    pub generation: Arc<AtomicU64>,
 }
 
 impl AudioPlayerState {
@@ -118,25 +120,11 @@ impl AudioPlayer {
             position_ms: Arc::new(AtomicU64::new(0)),
             duration_ms,
             volume: Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits())),
+            generation: Arc::new(AtomicU64::new(0)),
         });
 
         // Start position tracking thread
-        let state_clone = state.clone();
-        let start_time = std::time::Instant::now();
-        std::thread::spawn(move || {
-            while state_clone.is_playing.load(Ordering::Relaxed) {
-                let elapsed = start_time.elapsed().as_millis() as u64;
-                let pos = elapsed.min(state_clone.duration_ms);
-                state_clone.position_ms.store(pos, Ordering::Relaxed);
-
-                if pos >= state_clone.duration_ms {
-                    state_clone.is_playing.store(false, Ordering::Relaxed);
-                    break;
-                }
-
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        });
+        Self::start_position_tracking(&state, 0);
 
         self.sink = Some(sink);
         self.state = Some(state.clone());
@@ -204,8 +192,21 @@ impl AudioPlayer {
 
         if let (Some(data), Some(state)) = (&self.audio_data, &self.state) {
             let target_ms = (position * state.duration_ms as f32) as u64;
+            let target_duration = Duration::from_millis(target_ms);
 
-            // Stop current sink
+            // Increment generation to stop old position tracking threads
+            state.generation.fetch_add(1, Ordering::SeqCst);
+
+            // Try to seek on the current sink first
+            if let Some(sink) = &self.sink {
+                if sink.try_seek(target_duration).is_ok() {
+                    // Seek succeeded, restart position tracking from the new position
+                    Self::start_position_tracking(state, target_ms);
+                    return Ok(());
+                }
+            }
+
+            // Fallback: recreate the sink if seek failed
             if let Some(sink) = self.sink.take() {
                 sink.stop();
             }
@@ -215,16 +216,16 @@ impl AudioPlayer {
             let source = Decoder::new(cursor)?;
 
             let sink = Sink::try_new(&self.stream_handle)?;
-
-            // Try to skip to position (rodio's seek is limited)
-            // For now, we'll just update the position display
             sink.append(source);
+
+            // Try to seek on the new sink
+            let _ = sink.try_seek(target_duration);
 
             // Apply current volume
             sink.set_volume(state.get_volume());
 
-            // Update position
-            state.position_ms.store(target_ms, Ordering::Relaxed);
+            // Restart position tracking from seek position
+            Self::start_position_tracking(state, target_ms);
 
             if !state.is_playing() {
                 sink.pause();
@@ -234,6 +235,42 @@ impl AudioPlayer {
         }
 
         Ok(())
+    }
+
+    /// Start a position tracking thread that respects the generation counter
+    fn start_position_tracking(state: &Arc<AudioPlayerState>, start_pos_ms: u64) {
+        let state_clone = state.clone();
+        let current_gen = state.generation.load(Ordering::SeqCst);
+        let start_time = std::time::Instant::now();
+
+        // Update position immediately
+        state.position_ms.store(start_pos_ms, Ordering::Relaxed);
+
+        std::thread::spawn(move || {
+            loop {
+                // Check if this thread's generation is still current
+                if state_clone.generation.load(Ordering::SeqCst) != current_gen {
+                    // A newer thread has been started, exit this one
+                    break;
+                }
+
+                // Check if still playing
+                if !state_clone.is_playing.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let elapsed = start_time.elapsed().as_millis() as u64;
+                let pos = (start_pos_ms + elapsed).min(state_clone.duration_ms);
+                state_clone.position_ms.store(pos, Ordering::Relaxed);
+
+                if pos >= state_clone.duration_ms {
+                    state_clone.is_playing.store(false, Ordering::Relaxed);
+                    break;
+                }
+
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
     }
 
     /// Get duration of audio data

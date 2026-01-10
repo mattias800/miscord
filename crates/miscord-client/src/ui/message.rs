@@ -1026,54 +1026,28 @@ fn render_audio_attachment(
 
                     // Progress bar and time
                     if let Some(ps) = &playback_state {
-                        let progress = ps.get_position_ms() as f32 / ps.duration_ms.max(1) as f32;
+                        let mut progress = ps.get_position_ms() as f32 / ps.duration_ms.max(1) as f32;
 
-                        ui.horizontal(|ui| {
-                            // Time display
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} / {}",
-                                    format_duration(ps.get_position_ms()),
-                                    format_duration(ps.duration_ms)
-                                ))
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(180, 180, 180))
-                            );
-                        });
-
-                        // Progress bar (clickable for seeking)
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width().min(200.0), 6.0),
-                            egui::Sense::click(),
+                        // Time display
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} / {}",
+                                format_duration(ps.get_position_ms()),
+                                format_duration(ps.duration_ms)
+                            ))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(180, 180, 180))
                         );
 
-                        if ui.is_rect_visible(rect) {
-                            // Background
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::Rounding::same(3.0),
-                                egui::Color32::from_rgb(60, 60, 70),
-                            );
+                        // Progress slider (draggable, seek on release)
+                        let seek_slider = egui::Slider::new(&mut progress, 0.0..=1.0)
+                            .show_value(false)
+                            .trailing_fill(true);
 
-                            // Progress
-                            let progress_rect = egui::Rect::from_min_size(
-                                rect.min,
-                                egui::vec2(rect.width() * progress, rect.height()),
-                            );
-                            ui.painter().rect_filled(
-                                progress_rect,
-                                egui::Rounding::same(3.0),
-                                egui::Color32::from_rgb(88, 101, 242),
-                            );
-                        }
-
-                        // Seek on click
-                        if response.clicked() {
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                let seek_progress = (pos.x - rect.min.x) / rect.width();
-                                if let Some(player) = &mut renderer_state.audio_player {
-                                    let _ = player.seek(seek_progress);
-                                }
+                        let slider_response = ui.add_sized(egui::vec2(ui.available_width().min(200.0), 18.0), seek_slider);
+                        if slider_response.drag_stopped() {
+                            if let Some(player) = &mut renderer_state.audio_player {
+                                let _ = player.seek(progress);
                             }
                         }
 
@@ -1351,12 +1325,13 @@ pub fn render_lightbox(
     ctx: &egui::Context,
     renderer_state: &mut MessageRendererState,
 ) {
-    let lightbox = match &renderer_state.lightbox {
+    // Check if lightbox should be shown
+    let lightbox_data = match &renderer_state.lightbox {
         Some(l) => l.clone(),
         None => return,
     };
 
-    let LightboxState { image_key, width, height } = lightbox;
+    let LightboxState { image_key, width, height } = lightbox_data;
 
     // Get the texture
     let texture = match renderer_state.attachment_textures.get(&image_key) {
@@ -1367,19 +1342,44 @@ pub fn render_lightbox(
         }
     };
 
-    let mut should_close = false;
-
-    // Handle escape key
+    // Handle escape key first
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        should_close = true;
+        renderer_state.lightbox = None;
+        return;
     }
 
-    // Render backdrop
-    egui::Area::new(egui::Id::new("lightbox_backdrop"))
+    // Calculate image display dimensions
+    let screen = ctx.screen_rect();
+    let max_width = screen.width() * 0.9;
+    let max_height = screen.height() * 0.9;
+
+    let aspect = width as f32 / height as f32;
+    let mut display_width = width as f32;
+    let mut display_height = height as f32;
+
+    if display_width > max_width {
+        display_width = max_width;
+        display_height = display_width / aspect;
+    }
+    if display_height > max_height {
+        display_height = max_height;
+        display_width = display_height * aspect;
+    }
+
+    let image_rect = egui::Rect::from_center_size(
+        screen.center(),
+        egui::vec2(display_width, display_height),
+    );
+
+    // Use a single modal-style window approach instead of multiple areas
+    let modal_response = egui::Area::new(egui::Id::new("lightbox_modal"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(0.0, 0.0))
         .show(ctx, |ui| {
             let screen_rect = ui.ctx().screen_rect();
+
+            // Allocate the full screen for backdrop interaction
+            let backdrop_response = ui.allocate_rect(screen_rect, egui::Sense::click());
 
             // Dark backdrop
             ui.painter().rect_filled(
@@ -1388,89 +1388,54 @@ pub fn render_lightbox(
                 egui::Color32::from_rgba_unmultiplied(0, 0, 0, 220),
             );
 
-            // Click on backdrop to close
-            let response = ui.allocate_rect(screen_rect, egui::Sense::click());
-            if response.clicked() {
-                should_close = true;
-            }
-        });
-
-    // Render the image centered
-    egui::Area::new(egui::Id::new("lightbox_image"))
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            let screen = ctx.screen_rect();
-            let max_width = screen.width() * 0.9;
-            let max_height = screen.height() * 0.9;
-
-            // Calculate display size maintaining aspect ratio
-            let aspect = width as f32 / height as f32;
-            let mut display_width = width as f32;
-            let mut display_height = height as f32;
-
-            // Scale down if too large
-            if display_width > max_width {
-                display_width = max_width;
-                display_height = display_width / aspect;
-            }
-            if display_height > max_height {
-                display_height = max_height;
-                display_width = display_height * aspect;
-            }
-
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(display_width, display_height),
-                egui::Sense::click(),
+            // Draw the image (not interactive, we handle clicks via backdrop)
+            ui.painter().image(
+                texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
             );
 
-            if ui.is_rect_visible(rect) {
-                // Draw the image
-                ui.painter().image(
-                    texture.id(),
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-
-                // Subtle border
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::Rounding::same(4.0),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)),
-                );
-            }
-
-            // Click on image also closes
-            if response.clicked() {
-                should_close = true;
-            }
-        });
-
-    // Close button in top-right corner
-    egui::Area::new(egui::Id::new("lightbox_close"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(egui::pos2(ctx.screen_rect().right() - 60.0, 20.0))
-        .show(ctx, |ui| {
-            let close_btn = ui.add(
-                egui::Button::new(
-                    egui::RichText::new("✕")
-                        .size(24.0)
-                        .color(egui::Color32::WHITE)
-                )
-                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100))
-                .rounding(egui::Rounding::same(20.0))
-                .min_size(egui::vec2(40.0, 40.0))
+            // Subtle border around image
+            ui.painter().rect_stroke(
+                image_rect,
+                egui::Rounding::same(4.0),
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)),
             );
 
-            if close_btn.clicked() {
-                should_close = true;
-            }
+            // Close button
+            let close_rect = egui::Rect::from_min_size(
+                egui::pos2(screen_rect.right() - 55.0, 15.0),
+                egui::vec2(40.0, 40.0),
+            );
 
-            close_btn.on_hover_text("Close (Esc)");
+            let close_response = ui.allocate_rect(close_rect, egui::Sense::click());
+
+            // Draw close button
+            ui.painter().rect_filled(
+                close_rect,
+                egui::Rounding::same(20.0),
+                if close_response.hovered() {
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100)
+                },
+            );
+
+            ui.painter().text(
+                close_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "✕",
+                egui::FontId::proportional(24.0),
+                egui::Color32::WHITE,
+            );
+
+            // Return whether to close
+            backdrop_response.clicked() || close_response.clicked()
         });
 
-    if should_close {
+    // Close if clicked anywhere (backdrop or close button)
+    if modal_response.inner {
         renderer_state.lightbox = None;
     }
 }

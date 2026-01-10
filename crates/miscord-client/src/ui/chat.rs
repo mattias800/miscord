@@ -813,7 +813,6 @@ impl ChatView {
                 if !attachments.is_empty() {
                     match network.upload_files(channel_id, attachments).await {
                         Ok(uploaded) => {
-                            tracing::info!("Uploaded {} attachments", uploaded.len());
                             attachment_ids = uploaded.iter().map(|a| a.id).collect();
                         }
                         Err(e) => {
