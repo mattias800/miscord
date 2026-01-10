@@ -47,6 +47,7 @@ gstreamer-video = { workspace = true }
 # Audio
 cpal = { workspace = true }
 opus = { workspace = true }
+rodio = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

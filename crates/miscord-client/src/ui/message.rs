@@ -2,8 +2,10 @@
 
 use chrono::{DateTime, Local, Utc};
 use eframe::egui;
+use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::media::{AudioPlayer, AudioPlayerState, format_duration};
 use crate::network::{NetworkClient, OpenGraphData};
 use crate::state::AppState;
 use miscord_protocol::MessageData;
@@ -87,6 +89,24 @@ pub enum DownloadProgress {
     Failed(String),
 }
 
+/// Lightbox state for viewing images full-size
+#[derive(Clone)]
+pub struct LightboxState {
+    /// The URL/key of the image being viewed
+    pub image_key: String,
+    /// Original dimensions
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Audio playback state for an attachment
+pub struct AudioPlaybackState {
+    pub attachment_id: Uuid,
+    pub state: Arc<AudioPlayerState>,
+    /// Cached audio data for this attachment
+    pub data: Vec<u8>,
+}
+
 /// Shared state for emoji picker across messages
 pub struct MessageRendererState {
     /// Message ID for which emoji picker is open
@@ -97,6 +117,14 @@ pub struct MessageRendererState {
     pub attachment_textures: std::collections::HashMap<String, egui::TextureHandle>,
     /// Download progress for attachments (attachment_id -> progress)
     pub download_progress: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, DownloadProgress>>>,
+    /// Audio player instance
+    pub audio_player: Option<AudioPlayer>,
+    /// Currently playing audio state
+    pub audio_state: Option<AudioPlaybackState>,
+    /// Lightbox state for viewing images full-size
+    pub lightbox: Option<LightboxState>,
+    /// Cached audio data for attachments (attachment_id -> data)
+    pub audio_cache: std::collections::HashMap<Uuid, Vec<u8>>,
 }
 
 impl MessageRendererState {
@@ -106,6 +134,10 @@ impl MessageRendererState {
             link_preview_textures: std::collections::HashMap::new(),
             attachment_textures: std::collections::HashMap::new(),
             download_progress: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            audio_player: AudioPlayer::new().ok(),
+            audio_state: None,
+            lightbox: None,
+            audio_cache: std::collections::HashMap::new(),
         }
     }
 }
@@ -724,7 +756,7 @@ fn render_link_preview(
         });
 }
 
-/// Render a file attachment (image inline, other files as download cards)
+/// Render a file attachment (image inline, audio with player, other files as download cards)
 fn render_attachment(
     ui: &mut egui::Ui,
     attachment: &miscord_protocol::AttachmentData,
@@ -734,9 +766,12 @@ fn render_attachment(
     renderer_state: &mut MessageRendererState,
 ) {
     let is_image = attachment.content_type.starts_with("image/");
+    let is_audio = attachment.content_type.starts_with("audio/");
 
     if is_image {
         render_image_attachment(ui, attachment, state, network, runtime, renderer_state);
+    } else if is_audio {
+        render_audio_attachment(ui, attachment, state, network, runtime, renderer_state);
     } else {
         render_file_attachment(ui, attachment, network, runtime, renderer_state);
     }
@@ -828,15 +863,21 @@ fn render_image_attachment(
                 }
             }
 
+            // Click to open lightbox
+            if response.clicked() {
+                renderer_state.lightbox = Some(LightboxState {
+                    image_key: cache_key.clone(),
+                    width: *width,
+                    height: *height,
+                });
+            }
+
             // Show filename and size on hover
             response.on_hover_text(format!(
-                "{} ({})",
+                "{} ({}) - Click to view full size",
                 attachment.filename,
                 format_file_size(attachment.size_bytes)
             ));
-
-            // Click would open in browser - but for now we don't have full URLs
-            // In a future improvement, we could download the file to temp and open it
         }
     } else {
         // Show loading placeholder
@@ -854,6 +895,222 @@ fn render_image_attachment(
                     );
                 });
             });
+    }
+}
+
+/// Render an audio attachment with inline player
+fn render_audio_attachment(
+    ui: &mut egui::Ui,
+    attachment: &miscord_protocol::AttachmentData,
+    state: &AppState,
+    network: &NetworkClient,
+    runtime: &tokio::runtime::Runtime,
+    renderer_state: &mut MessageRendererState,
+) {
+    ui.add_space(4.0);
+
+    let attachment_id = attachment.id;
+
+    // Check if we have cached audio data
+    let has_data = renderer_state.audio_cache.contains_key(&attachment_id);
+
+    // Check if this is the currently playing audio
+    let is_current = renderer_state.audio_state
+        .as_ref()
+        .map(|s| s.attachment_id == attachment_id)
+        .unwrap_or(false);
+
+    // Get playback state for this attachment
+    let playback_state = if is_current {
+        renderer_state.audio_state.as_ref().map(|s| s.state.clone())
+    } else {
+        None
+    };
+
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(38, 40, 46))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui, |ui| {
+            ui.set_min_width(300.0);
+
+            ui.horizontal(|ui| {
+                // Play/Pause button
+                let is_playing = playback_state.as_ref().map(|s| s.is_playing()).unwrap_or(false);
+                let button_text = if is_playing { "⏸" } else { "▶" };
+
+                let play_btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(button_text)
+                            .size(20.0)
+                            .color(egui::Color32::WHITE)
+                    )
+                    .fill(egui::Color32::from_rgb(88, 101, 242))
+                    .rounding(egui::Rounding::same(16.0))
+                    .min_size(egui::vec2(32.0, 32.0))
+                );
+
+                if play_btn.clicked() {
+                    if is_current {
+                        // Toggle play/pause
+                        if let Some(player) = &mut renderer_state.audio_player {
+                            player.toggle();
+                        }
+                    } else if has_data {
+                        // Play from cache
+                        if let Some(data) = renderer_state.audio_cache.get(&attachment_id).cloned() {
+                            if let Some(player) = &mut renderer_state.audio_player {
+                                match player.play(attachment_id, data.clone()) {
+                                    Ok(state) => {
+                                        renderer_state.audio_state = Some(AudioPlaybackState {
+                                            attachment_id,
+                                            state,
+                                            data,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to play audio: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Fetch and play
+                        let network = network.clone();
+                        let url = attachment.url.clone();
+                        let state_clone = state.clone();
+
+                        // Sync fetch for simplicity
+                        let result = runtime.block_on(async {
+                            network.fetch_attachment_raw(&url).await
+                        });
+
+                        match result {
+                            Ok(data) => {
+                                // Cache the data
+                                renderer_state.audio_cache.insert(attachment_id, data.clone());
+
+                                // Play it
+                                if let Some(player) = &mut renderer_state.audio_player {
+                                    match player.play(attachment_id, data.clone()) {
+                                        Ok(state) => {
+                                            renderer_state.audio_state = Some(AudioPlaybackState {
+                                                attachment_id,
+                                                state,
+                                                data,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to play audio: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to fetch audio: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+
+                // Audio info and progress
+                ui.vertical(|ui| {
+                    // Filename
+                    ui.label(
+                        egui::RichText::new(&attachment.filename)
+                            .size(14.0)
+                            .color(egui::Color32::WHITE)
+                    );
+
+                    // Progress bar and time
+                    if let Some(ps) = &playback_state {
+                        let progress = ps.get_position_ms() as f32 / ps.duration_ms.max(1) as f32;
+
+                        ui.horizontal(|ui| {
+                            // Time display
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} / {}",
+                                    format_duration(ps.get_position_ms()),
+                                    format_duration(ps.duration_ms)
+                                ))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(180, 180, 180))
+                            );
+                        });
+
+                        // Progress bar (clickable for seeking)
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width().min(200.0), 6.0),
+                            egui::Sense::click(),
+                        );
+
+                        if ui.is_rect_visible(rect) {
+                            // Background
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::Rounding::same(3.0),
+                                egui::Color32::from_rgb(60, 60, 70),
+                            );
+
+                            // Progress
+                            let progress_rect = egui::Rect::from_min_size(
+                                rect.min,
+                                egui::vec2(rect.width() * progress, rect.height()),
+                            );
+                            ui.painter().rect_filled(
+                                progress_rect,
+                                egui::Rounding::same(3.0),
+                                egui::Color32::from_rgb(88, 101, 242),
+                            );
+                        }
+
+                        // Seek on click
+                        if response.clicked() {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let seek_progress = (pos.x - rect.min.x) / rect.width();
+                                if let Some(player) = &mut renderer_state.audio_player {
+                                    let _ = player.seek(seek_progress);
+                                }
+                            }
+                        }
+
+                        // Volume control
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("🔊")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(140, 140, 140))
+                            );
+
+                            let mut volume = ps.get_volume();
+                            let slider = egui::Slider::new(&mut volume, 0.0..=1.0)
+                                .show_value(false)
+                                .trailing_fill(true);
+
+                            if ui.add_sized(egui::vec2(60.0, 14.0), slider).changed() {
+                                if let Some(player) = &mut renderer_state.audio_player {
+                                    player.set_volume(volume);
+                                }
+                            }
+                        });
+                    } else {
+                        // Show file size when not playing
+                        ui.label(
+                            egui::RichText::new(format_file_size(attachment.size_bytes))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140))
+                        );
+                    }
+                });
+            });
+        });
+
+    // Request repaint while playing for animation
+    if playback_state.as_ref().map(|s| s.is_playing()).unwrap_or(false) {
+        ui.ctx().request_repaint();
     }
 }
 
@@ -1086,4 +1343,134 @@ async fn download_attachment_with_progress(
     }
 
     Ok(())
+}
+
+/// Render the image lightbox overlay if an image is being viewed
+/// This should be called after rendering all other UI elements
+pub fn render_lightbox(
+    ctx: &egui::Context,
+    renderer_state: &mut MessageRendererState,
+) {
+    let lightbox = match &renderer_state.lightbox {
+        Some(l) => l.clone(),
+        None => return,
+    };
+
+    let LightboxState { image_key, width, height } = lightbox;
+
+    // Get the texture
+    let texture = match renderer_state.attachment_textures.get(&image_key) {
+        Some(t) => t.clone(),
+        None => {
+            renderer_state.lightbox = None;
+            return;
+        }
+    };
+
+    let mut should_close = false;
+
+    // Handle escape key
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        should_close = true;
+    }
+
+    // Render backdrop
+    egui::Area::new(egui::Id::new("lightbox_backdrop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let screen_rect = ui.ctx().screen_rect();
+
+            // Dark backdrop
+            ui.painter().rect_filled(
+                screen_rect,
+                egui::Rounding::ZERO,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 220),
+            );
+
+            // Click on backdrop to close
+            let response = ui.allocate_rect(screen_rect, egui::Sense::click());
+            if response.clicked() {
+                should_close = true;
+            }
+        });
+
+    // Render the image centered
+    egui::Area::new(egui::Id::new("lightbox_image"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let screen = ctx.screen_rect();
+            let max_width = screen.width() * 0.9;
+            let max_height = screen.height() * 0.9;
+
+            // Calculate display size maintaining aspect ratio
+            let aspect = width as f32 / height as f32;
+            let mut display_width = width as f32;
+            let mut display_height = height as f32;
+
+            // Scale down if too large
+            if display_width > max_width {
+                display_width = max_width;
+                display_height = display_width / aspect;
+            }
+            if display_height > max_height {
+                display_height = max_height;
+                display_width = display_height * aspect;
+            }
+
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(display_width, display_height),
+                egui::Sense::click(),
+            );
+
+            if ui.is_rect_visible(rect) {
+                // Draw the image
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                // Subtle border
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::Rounding::same(4.0),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)),
+                );
+            }
+
+            // Click on image also closes
+            if response.clicked() {
+                should_close = true;
+            }
+        });
+
+    // Close button in top-right corner
+    egui::Area::new(egui::Id::new("lightbox_close"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(ctx.screen_rect().right() - 60.0, 20.0))
+        .show(ctx, |ui| {
+            let close_btn = ui.add(
+                egui::Button::new(
+                    egui::RichText::new("✕")
+                        .size(24.0)
+                        .color(egui::Color32::WHITE)
+                )
+                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100))
+                .rounding(egui::Rounding::same(20.0))
+                .min_size(egui::vec2(40.0, 40.0))
+            );
+
+            if close_btn.clicked() {
+                should_close = true;
+            }
+
+            close_btn.on_hover_text("Close (Esc)");
+        });
+
+    if should_close {
+        renderer_state.lightbox = None;
+    }
 }

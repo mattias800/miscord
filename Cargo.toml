@@ -65,6 +65,7 @@ image = { version = "0.24", default-features = false, features = ["png", "jpeg",
 # Audio
 cpal = "0.15"
 opus = "0.3"
+rodio = { version = "0.20", default-features = false, features = ["mp3", "wav", "vorbis", "flac"] }
 
 # Fast JPEG decoding
 turbojpeg = "1.0"

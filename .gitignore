@@ -51,3 +51,4 @@ coverage/
 *.key
 credentials.json
 secrets.json
+uploads/

@@ -104,14 +104,14 @@ Polish and enhanced functionality:
 #### 3.2 File Attachments ✅
 - [x] Upload images and files with messages
 - [x] Drag-and-drop support (with visual overlay)
-- [x] Image previews inline
+- [x] Image previews inline with lightbox (click to view full-size)
 - [x] Download links for non-image files (download cards with progress)
 - [x] File size limits and validation (25MB max, allowed extensions)
 - [x] Server-side storage (local directory with UUID-based filenames)
-- [ ] Audio file playback with inline player
-  - [ ] Play/pause, progress bar, seek functionality
-  - [ ] Current time and total duration display
-  - [ ] Volume control slider
+- [x] Audio file playback with inline player
+  - [x] Play/pause, progress bar, seek functionality
+  - [x] Current time and total duration display
+  - [x] Volume control slider
 
 #### 3.3 Infinite Scroll / Message History
 - [ ] Implement scroll-to-load-more for older messages

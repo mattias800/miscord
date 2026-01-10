@@ -712,6 +712,28 @@ impl NetworkClient {
         Ok((rgba.into_raw(), width, height))
     }
 
+    /// Fetch raw attachment bytes from the server (for audio, video, etc.)
+    /// attachment_url should be a relative path like "/api/files/{id}"
+    pub async fn fetch_attachment_raw(&self, attachment_url: &str) -> Result<Vec<u8>> {
+        let server_url = self.get_server_url().await;
+        let full_url = format!("{}{}", server_url, attachment_url);
+        let token = self.get_token().await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+
+        let mut request = client.get(&full_url);
+        if let Some(token) = token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = request.send().await?;
+        let bytes = response.bytes().await?;
+
+        Ok(bytes.to_vec())
+    }
+
     /// Get the base server URL (e.g., "http://localhost:3000")
     pub async fn get_base_url(&self) -> String {
         self.get_server_url().await

@@ -9,7 +9,8 @@ use crate::state::AppState;
 use miscord_protocol::{AttachmentData, MessageData};
 
 use super::message::{
-    format_file_size, render_message, MessageAction, MessageRenderOptions, MessageRendererState, ReactionInfo,
+    format_file_size, render_lightbox, render_message, MessageAction, MessageRenderOptions,
+    MessageRendererState, ReactionInfo,
 };
 
 /// How often to send typing indicators (in seconds)
@@ -761,6 +762,9 @@ impl ChatView {
                         }
                     });
             });
+
+        // Render lightbox overlay on top if an image is being viewed
+        render_lightbox(ui.ctx(), &mut self.renderer_state);
     }
 
     fn send_message(
