@@ -6,6 +6,7 @@ use crate::state::{AppState, PersistentSettings};
 use super::login::LoginView;
 use super::main_view::MainView;
 use super::settings::SettingsView;
+use super::quick_switcher::{QuickSwitcher, SwitcherItem};
 use super::theme;
 
 pub struct MiscordApp {
@@ -16,6 +17,7 @@ pub struct MiscordApp {
     login_view: LoginView,
     main_view: MainView,
     settings_view: SettingsView,
+    quick_switcher: QuickSwitcher,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +124,7 @@ impl MiscordApp {
             login_view: LoginView::new(),
             main_view: MainView::new(),
             settings_view: SettingsView::new(),
+            quick_switcher: QuickSwitcher::new(),
         }
     }
 
@@ -145,12 +148,76 @@ impl MiscordApp {
             self.view = View::Login;
         }
     }
+
+    /// Handle global keyboard shortcuts
+    fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        // Cmd+T (Mac) or Ctrl+T (Windows/Linux) to toggle quick switcher
+        let shortcut = ctx.input_mut(|i| {
+            let modifiers = if cfg!(target_os = "macos") {
+                egui::Modifiers::MAC_CMD
+            } else {
+                egui::Modifiers::CTRL
+            };
+            i.consume_key(modifiers, egui::Key::T)
+        });
+
+        if shortcut {
+            if self.quick_switcher.is_open() {
+                self.quick_switcher.close();
+            } else {
+                self.quick_switcher.open();
+            }
+        }
+    }
+
+    /// Handle selection from quick switcher
+    fn handle_switcher_selection(&mut self, item: SwitcherItem) {
+        match item {
+            SwitcherItem::Channel { id, community_id, .. } => {
+                let state = self.state.clone();
+                let network = self.network.clone();
+
+                self.runtime.spawn(async move {
+                    // Select community if different
+                    {
+                        let s = state.read().await;
+                        if s.current_community_id != Some(community_id) {
+                            drop(s);
+                            state.select_community(community_id).await;
+
+                            // Load channels for the new community
+                            if let Ok(channels) = network.get_channels(community_id).await {
+                                state.set_channels(channels).await;
+                            }
+                        }
+                    }
+
+                    // Select the channel
+                    state.select_channel(id).await;
+                    state.mark_channel_read(id).await;
+                    let _ = network.mark_channel_read(id).await;
+
+                    // Load messages
+                    if let Ok(messages) = network.get_messages(id, None).await {
+                        let mut s = state.write().await;
+                        s.messages.insert(id, messages);
+                    }
+
+                    // Subscribe to channel
+                    network.subscribe_channel(id).await;
+                });
+            }
+        }
+    }
 }
 
 impl eframe::App for MiscordApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request continuous repainting for real-time updates
         ctx.request_repaint();
+
+        // Handle global keyboard shortcuts FIRST (before any view handles input)
+        self.handle_global_shortcuts(ctx);
 
         match &self.view {
             View::Login => {
@@ -197,6 +264,11 @@ impl eframe::App for MiscordApp {
                 );
                 if open_settings {
                     self.view = View::Settings;
+                }
+
+                // Show quick switcher modal on top of main view
+                if let Some(item) = self.quick_switcher.show(ctx, &self.state, &self.runtime) {
+                    self.handle_switcher_selection(item);
                 }
             }
             View::Settings => {

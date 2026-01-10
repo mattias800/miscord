@@ -123,6 +123,9 @@ pub struct AppStateInner {
     pub image_pending: HashSet<String>,
     // Image URLs that failed to fetch (to prevent retries)
     pub image_failed: HashSet<String>,
+
+    // Recent channels for quick switcher (most recent first, max 10)
+    pub recent_channel_ids: Vec<Uuid>,
 }
 
 impl Default for AppStateInner {
@@ -174,6 +177,7 @@ impl Default for AppStateInner {
             image_cache: HashMap::new(),
             image_pending: HashSet::new(),
             image_failed: HashSet::new(),
+            recent_channel_ids: Vec::new(),
         }
     }
 }
@@ -287,6 +291,17 @@ impl AppState {
     pub async fn select_channel(&self, channel_id: Uuid) {
         let mut state = self.inner.write().await;
         state.current_channel_id = Some(channel_id);
+
+        // Add to recent channels (move to front if already present)
+        state.recent_channel_ids.retain(|&id| id != channel_id);
+        state.recent_channel_ids.insert(0, channel_id);
+        // Keep only the 10 most recent
+        state.recent_channel_ids.truncate(10);
+    }
+
+    /// Get recent channel IDs (most recent first)
+    pub async fn get_recent_channel_ids(&self) -> Vec<Uuid> {
+        self.inner.read().await.recent_channel_ids.clone()
     }
 
     /// Mark a channel as read locally (set unread_count to 0)

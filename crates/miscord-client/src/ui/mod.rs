@@ -12,7 +12,9 @@ mod markdown;
 mod settings;
 mod screen_picker;
 mod thread_panel;
+mod quick_switcher;
 pub mod theme;
 
 pub use app::MiscordApp;
 pub use screen_picker::{ScreenPickerDialog, CaptureSource};
+pub use quick_switcher::{QuickSwitcher, SwitcherItem};
