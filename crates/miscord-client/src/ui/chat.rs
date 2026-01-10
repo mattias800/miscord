@@ -49,6 +49,18 @@ pub struct ChatView {
     pending_attachments: Vec<PendingAttachment>,
     /// Currently viewed channel (for draft save/restore on channel switch)
     current_channel_id: Option<Uuid>,
+    /// Whether we're currently loading older messages
+    loading_history: bool,
+    /// Whether we've reached the end of message history (no more to load)
+    reached_history_end: bool,
+    /// Track if user has scrolled away from bottom (for "Jump to present" button)
+    scrolled_to_bottom: bool,
+    /// Request to jump to bottom on next frame
+    jump_to_bottom_requested: bool,
+    /// Track message count to detect when loading completes
+    last_message_count: usize,
+    /// Time when we started loading history (for timeout)
+    loading_started_at: Option<Instant>,
 }
 
 /// Get date separator text for a message
@@ -90,6 +102,12 @@ impl ChatView {
             mention_dismissed: false,
             pending_attachments: Vec::new(),
             current_channel_id: None,
+            loading_history: false,
+            reached_history_end: false,
+            scrolled_to_bottom: true,
+            jump_to_bottom_requested: false,
+            last_message_count: 0,
+            loading_started_at: None,
         }
     }
 
@@ -135,6 +153,13 @@ impl ChatView {
             self.editing_message = None;
             self.mention_active = false;
             self.current_channel_id = new_channel_id;
+            // Reset history state for new channel
+            self.loading_history = false;
+            self.reached_history_end = false;
+            self.scrolled_to_bottom = true;
+            self.jump_to_bottom_requested = false;
+            self.last_message_count = 0;
+            self.loading_started_at = None;
         }
 
         let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id) = runtime.block_on(async {
@@ -644,14 +669,49 @@ impl ChatView {
                     id_prefix: "chat",
                 };
 
-                // Only stick to bottom if we're not scrolling to a specific message
-                let stick_to_bottom = scroll_to_message_id.is_none();
+                // Only stick to bottom if we're not scrolling to a specific message and not loading history
+                let should_stick_to_bottom = scroll_to_message_id.is_none()
+                    && !self.loading_history
+                    && self.scrolled_to_bottom
+                    && !self.jump_to_bottom_requested;
 
-                egui::ScrollArea::vertical()
+                // Handle jump to bottom request
+                let force_scroll_to_bottom = self.jump_to_bottom_requested;
+                if force_scroll_to_bottom {
+                    self.jump_to_bottom_requested = false;
+                    self.scrolled_to_bottom = true;
+                }
+
+                let scroll_output = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .stick_to_bottom(stick_to_bottom)
+                    .stick_to_bottom(should_stick_to_bottom || force_scroll_to_bottom)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
+
+                        // Show loading indicator at top when loading history
+                        if self.loading_history {
+                            ui.horizontal(|ui| {
+                                ui.add_space(ui.available_width() / 2.0 - 50.0);
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new("Loading older messages...")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(140, 140, 140)),
+                                );
+                            });
+                            ui.add_space(8.0);
+                        } else if !self.reached_history_end && !messages.is_empty() {
+                            // Show "Load more" hint at top
+                            ui.horizontal(|ui| {
+                                ui.add_space(ui.available_width() / 2.0 - 40.0);
+                                ui.label(
+                                    egui::RichText::new("↑ Scroll up for more")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                                );
+                            });
+                            ui.add_space(8.0);
+                        }
 
                         let mut prev_message: Option<&MessageData> = None;
                         let mut found_scroll_target = false;
@@ -798,6 +858,102 @@ impl ChatView {
                             prev_message = Some(message);
                         }
                     });
+
+                // Check scroll position for infinite scroll
+                let scroll_offset = scroll_output.state.offset.y;
+                let content_height = scroll_output.content_size.y;
+                let viewport_height = scroll_output.inner_rect.height();
+
+                // Update scrolled_to_bottom state
+                let at_bottom = content_height <= viewport_height ||
+                    scroll_offset >= content_height - viewport_height - 50.0;
+                self.scrolled_to_bottom = at_bottom;
+
+                // Detect when loading completes by checking message count changes
+                let current_message_count = messages.len();
+                if self.loading_history {
+                    if current_message_count > self.last_message_count {
+                        // New messages were added - loading is complete
+                        self.loading_history = false;
+                        self.loading_started_at = None;
+                    } else if let Some(started) = self.loading_started_at {
+                        // Check for timeout (2 seconds) - assume we've reached the end
+                        if started.elapsed().as_secs() >= 2 {
+                            self.loading_history = false;
+                            self.loading_started_at = None;
+                            self.reached_history_end = true;
+                        }
+                    }
+                }
+                self.last_message_count = current_message_count;
+
+                // Load more messages when scrolled near the top
+                let near_top = scroll_offset < 100.0;
+                if near_top
+                    && !self.loading_history
+                    && !self.reached_history_end
+                    && !messages.is_empty()
+                    && current_channel.is_some()
+                {
+                    self.loading_history = true;
+                    self.loading_started_at = Some(Instant::now());
+                    // Get the oldest message ID (first in the list since we store DESC)
+                    if let Some(oldest_msg) = messages.first() {
+                        let oldest_id = oldest_msg.id;
+                        let channel_id = current_channel.unwrap();
+                        let state = state.clone();
+                        let network = network.clone();
+
+                        runtime.spawn(async move {
+                            match network.get_messages(channel_id, Some(oldest_id)).await {
+                                Ok(older_messages) => {
+                                    // Append older messages to the existing list
+                                    let mut s = state.write().await;
+                                    if let Some(existing) = s.messages.get_mut(&channel_id) {
+                                        // Messages are in DESC order, older messages go after existing
+                                        existing.extend(older_messages);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to load older messages: {}", e);
+                                }
+                            }
+                        });
+                    }
+                }
+
+                // Show "Jump to present" button when not at bottom
+                if !at_bottom {
+                    let button_rect = egui::Rect::from_center_size(
+                        egui::pos2(
+                            scroll_output.inner_rect.center().x,
+                            scroll_output.inner_rect.bottom() - 40.0,
+                        ),
+                        egui::vec2(140.0, 32.0),
+                    );
+
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        button_rect,
+                        egui::Rounding::same(16.0),
+                        egui::Color32::from_rgb(88, 101, 242),
+                    );
+
+                    let response = ui.put(
+                        button_rect,
+                        egui::Button::new(
+                            egui::RichText::new("↓ Jump to present")
+                                .color(egui::Color32::WHITE)
+                                .size(13.0),
+                        )
+                        .fill(egui::Color32::from_rgb(88, 101, 242))
+                        .rounding(egui::Rounding::same(16.0)),
+                    );
+
+                    if response.clicked() {
+                        self.jump_to_bottom_requested = true;
+                    }
+                }
             });
 
         // Render lightbox overlay on top if an image is being viewed

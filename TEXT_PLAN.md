@@ -113,12 +113,12 @@ Polish and enhanced functionality:
   - [x] Current time and total duration display
   - [x] Volume control slider
 
-#### 3.3 Infinite Scroll / Message History
-- [ ] Implement scroll-to-load-more for older messages
-- [ ] Use existing pagination API (skip/take)
-- [ ] "Jump to present" button when scrolled up
-- [ ] Loading indicator while fetching
-- [ ] Smart auto-scroll (scroll to new messages only when at bottom, preserve position when reading older messages)
+#### 3.3 Infinite Scroll / Message History ✅
+- [x] Implement scroll-to-load-more for older messages
+- [x] Use existing pagination API (before parameter)
+- [x] "Jump to present" button when scrolled up
+- [x] Loading indicator while fetching
+- [x] Smart auto-scroll (scroll to new messages only when at bottom, preserve position when reading older messages)
 
 #### 3.4 Message Search ✅
 - [x] Search within current channel or DM
@@ -232,8 +232,8 @@ Another agent is currently working on server, community, and user account manage
   - [x] Message reactions (emoji picker, counts, real-time sync via WebSocket, user ID tracking)
   - [x] Message search (Cmd+F, searches all accessible channels/DMs, click to navigate, privacy-aware)
   - [x] File attachments (drag-and-drop, file picker, inline images, download cards with progress)
+  - [x] Infinite scroll / Message history (scroll-to-load-more, "Jump to present" button)
   - [ ] Pinned messages - Not yet implemented
-  - [ ] Infinite scroll / Message history - Not yet implemented
 
 ### Not Started
 - [ ] Phase 4: Nice to Have
