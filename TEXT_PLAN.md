@@ -170,13 +170,13 @@ Lower priority enhancements:
 - [ ] User preference saved in settings
 
 #### 4.6 Keyboard Navigation
-- [ ] Arrow keys to navigate messages
-- [ ] `E` to edit selected message
-- [ ] `R` to reply to selected message
-- [ ] `Delete` to delete selected message
+- [x] Arrow keys to navigate messages
+- [x] `E` to edit selected message
+- [x] `R` to reply to selected message
+- [x] `Delete` to delete selected message
 - [x] `Ctrl+T` / `Cmd+T` for quick channel/DM switcher
 - [x] `Ctrl+F` / `Cmd+F` for message search
-- [ ] `Escape` to deselect/cancel
+- [x] `Escape` to deselect/cancel
 
 ---
 
@@ -242,7 +242,7 @@ Another agent is currently working on server, community, and user account manage
   - [ ] Voice/Video calls in DMs
   - [x] Draft messages (auto-save, restore, pencil indicator)
   - [ ] Compact mode
-  - [ ] Keyboard navigation
+  - [x] Keyboard navigation (Arrow keys, E to edit, R to reply, Delete, Escape)
 
 ### Other Improvements
 - [x] UI state persistence (community/channel selection, collapsed sections)

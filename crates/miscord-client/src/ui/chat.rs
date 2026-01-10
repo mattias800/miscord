@@ -61,6 +61,8 @@ pub struct ChatView {
     last_message_count: usize,
     /// Time when we started loading history (for timeout)
     loading_started_at: Option<Instant>,
+    /// Currently selected message for keyboard navigation
+    selected_message_id: Option<Uuid>,
 }
 
 /// Get date separator text for a message
@@ -108,6 +110,7 @@ impl ChatView {
             jump_to_bottom_requested: false,
             last_message_count: 0,
             loading_started_at: None,
+            selected_message_id: None,
         }
     }
 
@@ -160,6 +163,7 @@ impl ChatView {
             self.jump_to_bottom_requested = false;
             self.last_message_count = 0;
             self.loading_started_at = None;
+            self.selected_message_id = None;
         }
 
         let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id) = runtime.block_on(async {
@@ -236,6 +240,9 @@ impl ChatView {
 
             (channel_id, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id)
         });
+
+        // Handle keyboard navigation for messages
+        self.handle_keyboard_navigation(ui, &messages, current_user_id, state, network, runtime);
 
         if current_channel.is_none() {
             ui.centered_and_justified(|ui| {
@@ -786,6 +793,9 @@ impl ChatView {
                             // Check if this is the message we want to scroll to
                             let is_scroll_target = scroll_to_message_id == Some(message.id);
 
+                            // Check if this message is selected via keyboard navigation
+                            let is_selected = self.selected_message_id == Some(message.id);
+
                             // Track the position before rendering for scroll target
                             let before_cursor = ui.cursor();
 
@@ -799,6 +809,30 @@ impl ChatView {
                                     ),
                                     egui::Rounding::same(4.0),
                                     highlight_color,
+                                );
+                            }
+
+                            // Add selection highlight for keyboard navigation
+                            if is_selected {
+                                let selection_color = egui::Color32::from_rgba_unmultiplied(100, 120, 180, 50);
+                                let selection_border = egui::Color32::from_rgb(88, 101, 242);
+                                let selection_rect = egui::Rect::from_min_size(
+                                    before_cursor.min,
+                                    egui::vec2(ui.available_width(), 80.0),
+                                );
+                                ui.painter().rect_filled(
+                                    selection_rect,
+                                    egui::Rounding::same(4.0),
+                                    selection_color,
+                                );
+                                // Add left border to indicate selection
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        before_cursor.min,
+                                        egui::vec2(3.0, 80.0),
+                                    ),
+                                    egui::Rounding::same(2.0),
+                                    selection_border,
                                 );
                             }
 
@@ -852,6 +886,17 @@ impl ChatView {
                                     let mut s = state.write().await;
                                     s.scroll_to_message_id = None;
                                 });
+                            }
+
+                            // Scroll to keep selected message visible during keyboard navigation
+                            if is_selected {
+                                let after_cursor = ui.cursor();
+                                let message_rect = egui::Rect::from_min_max(
+                                    before_cursor.min,
+                                    egui::pos2(before_cursor.min.x + ui.available_width(), after_cursor.min.y),
+                                );
+                                // Use MIN align to gently scroll just enough to show the message
+                                ui.scroll_to_rect(message_rect, Some(egui::Align::Min));
                             }
 
                             ui.add_space(8.0);
@@ -1229,6 +1274,121 @@ impl ChatView {
         self.mention_active = false;
         self.mention_query.clear();
         self.mention_selected = 0;
+    }
+
+    /// Handle keyboard navigation for messages (Arrow keys, E, R, Delete, Escape)
+    fn handle_keyboard_navigation(
+        &mut self,
+        ui: &mut egui::Ui,
+        messages: &[MessageData],
+        current_user_id: Option<Uuid>,
+        state: &AppState,
+        network: &NetworkClient,
+        runtime: &tokio::runtime::Runtime,
+    ) {
+        // Don't handle navigation if we're editing or the input is focused
+        // We check if any text edit has focus
+        if self.editing_message.is_some() || self.mention_active {
+            return;
+        }
+
+        // Get message IDs in display order (reversed from storage, oldest first)
+        let message_ids: Vec<Uuid> = messages.iter().rev().map(|m| m.id).collect();
+
+        if message_ids.is_empty() {
+            return;
+        }
+
+        // Get current selection index
+        let current_index = self.selected_message_id
+            .and_then(|id| message_ids.iter().position(|&mid| mid == id));
+
+        // Handle keyboard input
+        ui.ctx().input_mut(|i| {
+            // Escape - deselect
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                self.selected_message_id = None;
+                self.replying_to = None;
+                return;
+            }
+
+            // Only process navigation keys if we have a selection or want to start one
+            // ArrowUp - move selection up (toward older messages / toward top)
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                if let Some(idx) = current_index {
+                    if idx > 0 {
+                        self.selected_message_id = Some(message_ids[idx - 1]);
+                    }
+                } else {
+                    // No selection, select the newest message (last in display order)
+                    self.selected_message_id = message_ids.last().copied();
+                }
+                return;
+            }
+
+            // ArrowDown - move selection down (toward newer messages / toward bottom)
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                if let Some(idx) = current_index {
+                    if idx < message_ids.len() - 1 {
+                        self.selected_message_id = Some(message_ids[idx + 1]);
+                    }
+                } else {
+                    // No selection, select the newest message
+                    self.selected_message_id = message_ids.last().copied();
+                }
+                return;
+            }
+
+            // Only handle action keys if we have a selection
+            if let Some(selected_id) = self.selected_message_id {
+                // Find the selected message
+                if let Some(msg) = messages.iter().find(|m| m.id == selected_id) {
+                    // E - Edit (only own messages)
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::E) {
+                        if current_user_id == Some(msg.author_id) {
+                            self.editing_message = Some(msg.clone());
+                            self.message_input = msg.content.clone();
+                            self.replying_to = None;
+                            self.selected_message_id = None;
+                        }
+                        return;
+                    }
+
+                    // R - Reply
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::R) {
+                        self.replying_to = Some(msg.clone());
+                        self.editing_message = None;
+                        self.selected_message_id = None;
+                        return;
+                    }
+
+                    // Delete - Delete message (only own messages)
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                        || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+                    {
+                        if current_user_id == Some(msg.author_id) {
+                            let network = network.clone();
+                            let msg_id = msg.id;
+                            let state = state.clone();
+                            let channel_id = msg.channel_id;
+                            runtime.spawn(async move {
+                                if let Err(e) = network.delete_message(msg_id).await {
+                                    tracing::warn!("Failed to delete message: {}", e);
+                                } else {
+                                    // Remove from local state
+                                    let mut s = state.write().await;
+                                    if let Some(msgs) = s.messages.get_mut(&channel_id) {
+                                        msgs.retain(|m| m.id != msg_id);
+                                    }
+                                }
+                            });
+                            self.selected_message_id = None;
+                        }
+                        return;
+                    }
+                }
+            }
+        });
     }
 }
 
