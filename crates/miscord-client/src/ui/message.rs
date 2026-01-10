@@ -935,19 +935,19 @@ fn render_audio_attachment(
             ui.set_min_width(300.0);
 
             ui.horizontal(|ui| {
-                // Play/Pause button
+                // Play/Pause button (circular)
                 let is_playing = playback_state.as_ref().map(|s| s.is_playing()).unwrap_or(false);
                 let button_text = if is_playing { "⏸" } else { "▶" };
 
-                let play_btn = ui.add(
+                let play_btn = ui.add_sized(
+                    egui::vec2(36.0, 36.0),
                     egui::Button::new(
                         egui::RichText::new(button_text)
-                            .size(20.0)
+                            .size(18.0)
                             .color(egui::Color32::WHITE)
                     )
                     .fill(egui::Color32::from_rgb(88, 101, 242))
-                    .rounding(egui::Rounding::same(16.0))
-                    .min_size(egui::vec2(32.0, 32.0))
+                    .rounding(egui::Rounding::same(18.0))
                 );
 
                 if play_btn.clicked() {
