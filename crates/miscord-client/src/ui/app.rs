@@ -7,6 +7,7 @@ use super::login::LoginView;
 use super::main_view::MainView;
 use super::settings::SettingsView;
 use super::quick_switcher::{QuickSwitcher, SwitcherItem};
+use super::message_search::{MessageSearch, SearchSelection};
 use super::theme;
 
 pub struct MiscordApp {
@@ -18,6 +19,7 @@ pub struct MiscordApp {
     main_view: MainView,
     settings_view: SettingsView,
     quick_switcher: QuickSwitcher,
+    message_search: MessageSearch,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -125,6 +127,7 @@ impl MiscordApp {
             main_view: MainView::new(),
             settings_view: SettingsView::new(),
             quick_switcher: QuickSwitcher::new(),
+            message_search: MessageSearch::new(),
         }
     }
 
@@ -151,21 +154,39 @@ impl MiscordApp {
 
     /// Handle global keyboard shortcuts
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
-        // Cmd+T (Mac) or Ctrl+T (Windows/Linux) to toggle quick switcher
-        let shortcut = ctx.input_mut(|i| {
-            let modifiers = if cfg!(target_os = "macos") {
-                egui::Modifiers::MAC_CMD
-            } else {
-                egui::Modifiers::CTRL
-            };
-            i.consume_key(modifiers, egui::Key::T)
-        });
+        let modifiers = if cfg!(target_os = "macos") {
+            egui::Modifiers::MAC_CMD
+        } else {
+            egui::Modifiers::CTRL
+        };
 
-        if shortcut {
+        // Cmd+T (Mac) or Ctrl+T (Windows/Linux) to toggle quick switcher
+        let quick_switch = ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::T));
+
+        if quick_switch {
+            // Close message search if open
+            if self.message_search.is_open() {
+                self.message_search.close();
+            }
             if self.quick_switcher.is_open() {
                 self.quick_switcher.close();
             } else {
                 self.quick_switcher.open();
+            }
+        }
+
+        // Cmd+F (Mac) or Ctrl+F (Windows/Linux) to toggle message search
+        let search = ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::F));
+
+        if search {
+            // Close quick switcher if open
+            if self.quick_switcher.is_open() {
+                self.quick_switcher.close();
+            }
+            if self.message_search.is_open() {
+                self.message_search.close();
+            } else {
+                self.message_search.open();
             }
         }
     }
@@ -208,6 +229,50 @@ impl MiscordApp {
                 });
             }
         }
+    }
+
+    /// Handle selection from message search
+    fn handle_search_selection(&mut self, selection: SearchSelection) {
+        let state = self.state.clone();
+        let network = self.network.clone();
+        let message_id = selection.message_id;
+
+        self.runtime.spawn(async move {
+            // Switch community if needed
+            if let Some(community_id) = selection.community_id {
+                let needs_switch = {
+                    let s = state.read().await;
+                    s.current_community_id != Some(community_id)
+                };
+
+                if needs_switch {
+                    state.select_community(community_id).await;
+                    if let Ok(channels) = network.get_channels(community_id).await {
+                        state.set_channels(channels).await;
+                    }
+                }
+            }
+
+            // Select the channel
+            state.select_channel(selection.channel_id).await;
+            state.mark_channel_read(selection.channel_id).await;
+            let _ = network.mark_channel_read(selection.channel_id).await;
+
+            // Load messages for the channel
+            if let Ok(messages) = network.get_messages(selection.channel_id, None).await {
+                let mut s = state.write().await;
+                s.messages.insert(selection.channel_id, messages);
+            }
+
+            // Set scroll target message
+            {
+                let mut s = state.write().await;
+                s.scroll_to_message_id = Some(message_id);
+            }
+
+            // Subscribe to channel
+            network.subscribe_channel(selection.channel_id).await;
+        });
     }
 }
 
@@ -269,6 +334,11 @@ impl eframe::App for MiscordApp {
                 // Show quick switcher modal on top of main view
                 if let Some(item) = self.quick_switcher.show(ctx, &self.state, &self.runtime) {
                     self.handle_switcher_selection(item);
+                }
+
+                // Show message search modal on top of main view
+                if let Some(selection) = self.message_search.show(ctx, &self.state, &self.network, &self.runtime) {
+                    self.handle_search_selection(selection);
                 }
             }
             View::Settings => {

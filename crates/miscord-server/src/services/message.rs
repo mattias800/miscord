@@ -311,6 +311,59 @@ impl MessageService {
         Ok(result)
     }
 
+    /// Search messages by content across all channels the user has access to
+    /// Returns messages matching the query, newest first
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        community_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        let search_pattern = format!("%{}%", query);
+
+        let messages = if let Some(comm_id) = community_id {
+            // Search within a specific community
+            sqlx::query_as!(
+                Message,
+                r#"
+                SELECT m.id, m.channel_id, m.author_id, m.content, m.edited_at, m.reply_to_id,
+                       m.thread_parent_id, m.reply_count, m.last_reply_at, m.created_at
+                FROM messages m
+                JOIN channels c ON m.channel_id = c.id
+                WHERE m.content ILIKE $1
+                  AND c.community_id = $2
+                  AND m.thread_parent_id IS NULL
+                ORDER BY m.created_at DESC
+                LIMIT $3
+                "#,
+                search_pattern,
+                comm_id,
+                limit
+            )
+            .fetch_all(&self.db)
+            .await?
+        } else {
+            // Search across all channels
+            sqlx::query_as!(
+                Message,
+                r#"
+                SELECT id, channel_id, author_id, content, edited_at, reply_to_id,
+                       thread_parent_id, reply_count, last_reply_at, created_at
+                FROM messages
+                WHERE content ILIKE $1 AND thread_parent_id IS NULL
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#,
+                search_pattern,
+                limit
+            )
+            .fetch_all(&self.db)
+            .await?
+        };
+
+        Ok(messages)
+    }
+
     /// Get reactions for multiple messages at once (more efficient)
     pub async fn get_reactions_for_messages(&self, message_ids: &[Uuid], user_id: Uuid) -> Result<std::collections::HashMap<Uuid, Vec<(String, Vec<Uuid>, bool)>>> {
         if message_ids.is_empty() {

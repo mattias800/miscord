@@ -99,7 +99,7 @@ impl ChatView {
         // Handle dropped files (drag-and-drop)
         self.handle_dropped_files(ui);
 
-        let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members) = runtime.block_on(async {
+        let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id) = runtime.block_on(async {
             let s = state.read().await;
             let channel_id = s.current_channel_id;
             let messages = channel_id
@@ -168,7 +168,10 @@ impl ChatView {
                 })
                 .collect();
 
-            (channel_id, messages, channel_name, typing_usernames, current_user_id, message_reactions, members)
+            // Get scroll target
+            let scroll_to_message_id = s.scroll_to_message_id;
+
+            (channel_id, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id)
         });
 
         if current_channel.is_none() {
@@ -603,13 +606,17 @@ impl ChatView {
                     id_prefix: "chat",
                 };
 
+                // Only stick to bottom if we're not scrolling to a specific message
+                let stick_to_bottom = scroll_to_message_id.is_none();
+
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .stick_to_bottom(true)
+                    .stick_to_bottom(stick_to_bottom)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
 
                         let mut prev_message: Option<&MessageData> = None;
+                        let mut found_scroll_target = false;
 
                         // Messages come from server in DESC order (newest first)
                         // Reverse to show oldest first (newest at bottom)
@@ -678,6 +685,24 @@ impl ChatView {
                             // Get reactions for this message from state
                             let reactions = message_reactions.get(&message.id).map(|v| v.as_slice());
 
+                            // Check if this is the message we want to scroll to
+                            let is_scroll_target = scroll_to_message_id == Some(message.id);
+
+                            // Add highlight if this is the scroll target
+                            if is_scroll_target {
+                                // Draw a highlight background behind the message
+                                let cursor_rect = ui.cursor();
+                                let highlight_color = egui::Color32::from_rgba_unmultiplied(88, 101, 242, 40);
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        cursor_rect.min,
+                                        egui::vec2(ui.available_width(), 80.0),
+                                    ),
+                                    egui::Rounding::same(4.0),
+                                    highlight_color,
+                                );
+                            }
+
                             // Render the message using the shared component
                             if let Some(action) = render_message(
                                 ui,
@@ -707,6 +732,19 @@ impl ChatView {
                                         });
                                     }
                                 }
+                            }
+
+                            // Scroll to this message if it's the target
+                            if is_scroll_target && !found_scroll_target {
+                                found_scroll_target = true;
+                                ui.scroll_to_cursor(Some(egui::Align::Center));
+
+                                // Clear the scroll target
+                                let state = state.clone();
+                                runtime.spawn(async move {
+                                    let mut s = state.write().await;
+                                    s.scroll_to_message_id = None;
+                                });
                             }
 
                             ui.add_space(8.0);

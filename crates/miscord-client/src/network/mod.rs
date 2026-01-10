@@ -20,6 +20,14 @@ pub struct VoiceParticipantResponse {
     pub screen_sharing: bool,
 }
 
+/// Search result with channel information
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageSearchResult {
+    pub message: MessageData,
+    pub channel_name: String,
+    pub community_name: String,
+}
+
 #[derive(Clone)]
 pub struct NetworkClient {
     state: AppState,
@@ -264,6 +272,29 @@ impl NetworkClient {
             )
         } else {
             format!("{}/api/channels/{}/messages", server_url, channel_id)
+        };
+
+        api::get(&url, token.as_deref()).await
+    }
+
+    /// Search messages by content
+    pub async fn search_messages(&self, query: &str, community_id: Option<Uuid>) -> Result<Vec<MessageSearchResult>> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        let url = if let Some(comm_id) = community_id {
+            format!(
+                "{}/api/messages/search?q={}&community_id={}",
+                server_url,
+                urlencoding::encode(query),
+                comm_id
+            )
+        } else {
+            format!(
+                "{}/api/messages/search?q={}",
+                server_url,
+                urlencoding::encode(query)
+            )
         };
 
         api::get(&url, token.as_deref()).await

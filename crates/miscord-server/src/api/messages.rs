@@ -550,3 +550,150 @@ pub async fn create_thread_reply(
 
     Ok(Json(message_data))
 }
+
+// Search endpoints
+
+#[derive(Debug, Deserialize)]
+pub struct SearchMessagesQuery {
+    pub q: String,
+    pub community_id: Option<Uuid>,
+    pub limit: Option<i64>,
+}
+
+/// Search result with channel information
+#[derive(Debug, serde::Serialize)]
+pub struct MessageSearchResult {
+    pub message: MessageData,
+    pub channel_name: String,
+    pub community_name: String,
+}
+
+/// Search messages by content
+pub async fn search_messages(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<SearchMessagesQuery>,
+) -> Result<Json<Vec<MessageSearchResult>>> {
+    let limit = query.limit.unwrap_or(20).min(50);
+
+    // Don't search empty queries
+    if query.q.trim().is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    let messages = state
+        .message_service
+        .search_messages(&query.q, query.community_id, limit)
+        .await?;
+
+    if messages.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    // Get message IDs for batch lookups
+    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+
+    // Get reactions for all messages
+    let reactions_map = state
+        .message_service
+        .get_reactions_for_messages(&message_ids, auth.user_id)
+        .await
+        .unwrap_or_default();
+
+    // Get attachments for all messages
+    let attachments_list = state
+        .attachment_service
+        .get_by_message_ids(&message_ids)
+        .await
+        .unwrap_or_default();
+
+    // Group attachments by message_id
+    let mut attachments_map: std::collections::HashMap<Uuid, Vec<miscord_protocol::AttachmentData>> =
+        std::collections::HashMap::new();
+    for att in attachments_list {
+        if let Some(message_id) = att.message_id {
+            attachments_map
+                .entry(message_id)
+                .or_default()
+                .push(miscord_protocol::AttachmentData {
+                    id: att.id,
+                    filename: att.filename,
+                    content_type: att.content_type,
+                    size_bytes: att.size_bytes,
+                    url: att.url,
+                });
+        }
+    }
+
+    // Build results with channel and community names
+    let mut results = Vec::with_capacity(messages.len());
+    for msg in messages {
+        // Get author name
+        let author_name = state
+            .user_service
+            .get_by_id(msg.author_id)
+            .await
+            .map(|u| u.display_name)
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        // Get channel info (use channel service)
+        let channel_info = state.channel_service.get_by_id(msg.channel_id).await.ok();
+        let channel_name = channel_info.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Unknown".to_string());
+        let community_name = if let Some(ref ch) = channel_info {
+            if let Some(comm_id) = ch.community_id {
+                // Query community name directly
+                sqlx::query_scalar!("SELECT name FROM communities WHERE id = $1", comm_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "Unknown".to_string())
+            } else {
+                "Unknown".to_string()
+            }
+        } else {
+            "Unknown".to_string()
+        };
+
+        // Get reactions for this message
+        let reactions = reactions_map
+            .get(&msg.id)
+            .map(|r| {
+                r.iter()
+                    .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
+                        emoji: emoji.clone(),
+                        user_ids: user_ids.clone(),
+                        reacted_by_me: *reacted_by_me,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Get attachments for this message
+        let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
+
+        let message_data = MessageData {
+            id: msg.id,
+            channel_id: msg.channel_id,
+            author_id: msg.author_id,
+            author_name,
+            content: msg.content,
+            edited_at: msg.edited_at,
+            reply_to_id: msg.reply_to_id,
+            reactions,
+            attachments,
+            created_at: msg.created_at,
+            thread_parent_id: msg.thread_parent_id,
+            reply_count: msg.reply_count,
+            last_reply_at: msg.last_reply_at,
+        };
+
+        results.push(MessageSearchResult {
+            message: message_data,
+            channel_name,
+            community_name,
+        });
+    }
+
+    Ok(Json(results))
+}

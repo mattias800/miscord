@@ -126,6 +126,9 @@ pub struct AppStateInner {
 
     // Recent channels for quick switcher (most recent first, max 10)
     pub recent_channel_ids: Vec<Uuid>,
+
+    // Scroll to a specific message (set when navigating from search)
+    pub scroll_to_message_id: Option<Uuid>,
 }
 
 impl Default for AppStateInner {
@@ -178,6 +181,7 @@ impl Default for AppStateInner {
             image_pending: HashSet::new(),
             image_failed: HashSet::new(),
             recent_channel_ids: Vec::new(),
+            scroll_to_message_id: None,
         }
     }
 }
