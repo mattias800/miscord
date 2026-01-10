@@ -164,9 +164,9 @@ impl MessageSearch {
             self.last_searched_query.clear();
         }
 
-        // Render modal
+        // Render backdrop (lower order)
         egui::Area::new(egui::Id::new("message_search_backdrop"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(egui::pos2(0.0, 0.0))
             .show(ctx, |ui| {
                 let screen_rect = ui.ctx().screen_rect();
@@ -185,7 +185,9 @@ impl MessageSearch {
                 }
             });
 
+        // Render modal (higher order, above backdrop)
         egui::Window::new("Message Search")
+            .order(egui::Order::Foreground)
             .title_bar(false)
             .collapsible(false)
             .resizable(false)

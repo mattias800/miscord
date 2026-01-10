@@ -106,9 +106,9 @@ impl QuickSwitcher {
             should_close = true;
         }
 
-        // Render modal
+        // Render backdrop (lower order)
         egui::Area::new(egui::Id::new("quick_switcher_backdrop"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(egui::pos2(0.0, 0.0))
             .show(ctx, |ui| {
                 let screen_rect = ui.ctx().screen_rect();
@@ -127,7 +127,9 @@ impl QuickSwitcher {
                 }
             });
 
+        // Render modal (higher order, above backdrop)
         egui::Window::new("Quick Switcher")
+            .order(egui::Order::Foreground)
             .title_bar(false)
             .collapsible(false)
             .resizable(false)

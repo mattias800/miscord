@@ -368,8 +368,8 @@ impl MessageService {
                       WHERE cm.community_id = c.community_id AND cm.user_id = $2
                     ))
                     OR
-                    -- DM channels: user must be a participant
-                    (c.channel_type = 'direct_message' AND EXISTS (
+                    -- DM channels: user must be a participant (cast enum to text for comparison)
+                    (c.channel_type::text = 'direct_message' AND EXISTS (
                       SELECT 1 FROM direct_message_channels dm
                       WHERE dm.channel_id = c.id AND (dm.user1_id = $2 OR dm.user2_id = $2)
                     ))
