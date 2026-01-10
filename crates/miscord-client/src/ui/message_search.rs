@@ -128,19 +128,15 @@ impl MessageSearch {
             self.is_searching = true;
             self.last_searched_query = query.clone();
 
-            // Get current community for scoped search
-            let community_id = runtime.block_on(async {
-                state.read().await.current_community_id
-            });
-
             let network = network.clone();
             let ctx = ctx.clone();
 
-            // We need to store results somewhere accessible
-            // For simplicity, we'll do a blocking search here
-            // In production, you'd want async with state updates
+            // Search across all accessible content (DMs and community channels)
+            // The server enforces privacy - only returns messages from:
+            // - Communities the user is a member of
+            // - DMs where the user is a participant
             let results = runtime.block_on(async {
-                network.search_messages(&query, community_id).await
+                network.search_messages(&query, None).await
             });
 
             match results {
