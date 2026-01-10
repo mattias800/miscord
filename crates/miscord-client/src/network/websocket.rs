@@ -282,6 +282,22 @@ impl WebSocketClient {
             } => {
                 state.update_thread_metadata(message_id, reply_count, last_reply_at).await;
             }
+            // Pinned messages
+            ServerMessage::MessagePinned {
+                message_id,
+                channel_id,
+                pinned_by_id: _,
+                pinned_by_name,
+                pinned_at,
+            } => {
+                state.mark_message_pinned(message_id, channel_id, pinned_at, pinned_by_name).await;
+            }
+            ServerMessage::MessageUnpinned {
+                message_id,
+                channel_id,
+            } => {
+                state.mark_message_unpinned(message_id, channel_id).await;
+            }
             _ => {}
         }
     }

@@ -53,6 +53,10 @@ pub enum MessageAction {
     Edit(MessageData),
     /// User wants to open/start a thread on this message
     OpenThread(Uuid),
+    /// User wants to pin this message
+    Pin(Uuid),
+    /// User wants to unpin this message
+    Unpin(Uuid),
 }
 
 /// Options for rendering a message
@@ -217,6 +221,18 @@ pub fn render_message(
             );
         }
 
+        // Pinned indicator
+        if message.pinned_at.is_some() {
+            let pinned_label = ui.label(
+                egui::RichText::new("📌")
+                    .small()
+                    .color(egui::Color32::from_rgb(255, 200, 100)),
+            );
+            if let Some(ref pinned_by) = message.pinned_by {
+                pinned_label.on_hover_text(format!("Pinned by {}", pinned_by));
+            }
+        }
+
         // Action buttons - subtle icons that appear on hover
         ui.add_space(12.0);
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -279,7 +295,22 @@ pub fn render_message(
                     }
                 });
             }
-            del_btn.on_hover_text("Delete");
+        }
+
+        // Pin/Unpin button
+        let is_pinned = message.pinned_at.is_some();
+        let (pin_icon, pin_tooltip) = if is_pinned {
+            ("📌", "Unpin message")
+        } else {
+            ("📍", "Pin message")
+        };
+        let pin_btn = action_btn(ui, pin_icon, pin_tooltip);
+        if pin_btn.clicked() {
+            if is_pinned {
+                action = Some(MessageAction::Unpin(message.id));
+            } else {
+                action = Some(MessageAction::Pin(message.id));
+            }
         }
     });
 

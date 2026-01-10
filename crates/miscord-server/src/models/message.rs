@@ -14,6 +14,8 @@ pub struct Message {
     pub thread_parent_id: Option<Uuid>,
     pub reply_count: i32,
     pub last_reply_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
+    pub pinned_by_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -62,6 +64,8 @@ pub struct MessageWithAuthor {
     pub thread_parent_id: Option<Uuid>,
     pub reply_count: i32,
     pub last_reply_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
+    pub pinned_by: Option<String>,
     pub attachments: Vec<MessageAttachment>,
     pub reactions: Vec<ReactionCount>,
     pub created_at: DateTime<Utc>,

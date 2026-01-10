@@ -78,6 +78,9 @@ pub struct MessageData {
     #[serde(default)]
     pub reply_count: i32,
     pub last_reply_at: Option<DateTime<Utc>>,
+    // Pinned message fields
+    pub pinned_at: Option<DateTime<Utc>>,
+    pub pinned_by: Option<String>,
 }
 
 /// Thread data with parent message and replies

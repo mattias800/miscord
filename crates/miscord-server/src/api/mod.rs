@@ -94,6 +94,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/opengraph", get(opengraph::fetch_opengraph))
         // Message search
         .route("/api/messages/search", get(messages::search_messages))
+        // Pinned messages routes
+        .route(
+            "/api/messages/{id}/pin",
+            post(messages::pin_message).delete(messages::unpin_message),
+        )
+        .route(
+            "/api/channels/{id}/pinned-messages",
+            get(messages::get_pinned_messages),
+        )
         // File attachment routes
         .route("/api/channels/{id}/upload", post(attachments::upload_files))
         .route("/api/files/{id}", get(attachments::download_file))

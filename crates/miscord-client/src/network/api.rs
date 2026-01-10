@@ -164,3 +164,23 @@ pub async fn delete(url: &str, token: Option<&str>) -> Result<()> {
 
     Ok(())
 }
+
+pub async fn delete_with_response<T: DeserializeOwned>(url: &str, token: Option<&str>) -> Result<T> {
+    let client = reqwest::Client::new();
+    let mut request = client.delete(url);
+
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request.send().await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Request failed with status {}: {}", status, text);
+    }
+
+    let result = response.json().await?;
+    Ok(result)
+}

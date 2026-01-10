@@ -90,6 +90,13 @@ pub async fn list_messages(
         // Get attachments for this message
         let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
 
+        // Get pinned_by display name if message is pinned
+        let pinned_by = if let Some(pinned_by_id) = msg.pinned_by_id {
+            state.user_service.get_by_id(pinned_by_id).await.ok().map(|u| u.display_name)
+        } else {
+            None
+        };
+
         result.push(MessageData {
             id: msg.id,
             channel_id: msg.channel_id,
@@ -104,6 +111,8 @@ pub async fn list_messages(
             thread_parent_id: msg.thread_parent_id,
             reply_count: msg.reply_count,
             last_reply_at: msg.last_reply_at,
+            pinned_at: msg.pinned_at,
+            pinned_by,
         });
     }
 
@@ -174,6 +183,8 @@ pub async fn create_message(
         thread_parent_id: message.thread_parent_id,
         reply_count: message.reply_count,
         last_reply_at: message.last_reply_at,
+        pinned_at: None, // New messages are not pinned
+        pinned_by: None,
     };
 
     // Broadcast to channel subscribers
@@ -240,6 +251,13 @@ pub async fn update_message(
         })
         .unwrap_or_default();
 
+    // Get pinned_by display name if message is pinned
+    let pinned_by = if let Some(pinned_by_id) = message.pinned_by_id {
+        state.user_service.get_by_id(pinned_by_id).await.ok().map(|u| u.display_name)
+    } else {
+        None
+    };
+
     let message_data = MessageData {
         id: message.id,
         channel_id: message.channel_id,
@@ -254,6 +272,8 @@ pub async fn update_message(
         thread_parent_id: message.thread_parent_id,
         reply_count: message.reply_count,
         last_reply_at: message.last_reply_at,
+        pinned_at: message.pinned_at,
+        pinned_by,
     };
 
     // Broadcast update
@@ -425,6 +445,13 @@ pub async fn get_thread(
 
     let parent_attachments = attachments_map.remove(&parent.id).unwrap_or_default();
 
+    // Get pinned_by display name for parent if pinned
+    let parent_pinned_by = if let Some(pinned_by_id) = parent.pinned_by_id {
+        state.user_service.get_by_id(pinned_by_id).await.ok().map(|u| u.display_name)
+    } else {
+        None
+    };
+
     let parent_data = MessageData {
         id: parent.id,
         channel_id: parent.channel_id,
@@ -439,6 +466,8 @@ pub async fn get_thread(
         thread_parent_id: parent.thread_parent_id,
         reply_count: parent.reply_count,
         last_reply_at: parent.last_reply_at,
+        pinned_at: parent.pinned_at,
+        pinned_by: parent_pinned_by,
     };
 
     // Build reply MessageData list
@@ -466,6 +495,13 @@ pub async fn get_thread(
 
         let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
 
+        // Get pinned_by display name if message is pinned
+        let pinned_by = if let Some(pinned_by_id) = msg.pinned_by_id {
+            state.user_service.get_by_id(pinned_by_id).await.ok().map(|u| u.display_name)
+        } else {
+            None
+        };
+
         replies_data.push(MessageData {
             id: msg.id,
             channel_id: msg.channel_id,
@@ -480,6 +516,8 @@ pub async fn get_thread(
             thread_parent_id: msg.thread_parent_id,
             reply_count: msg.reply_count,
             last_reply_at: msg.last_reply_at,
+            pinned_at: msg.pinned_at,
+            pinned_by,
         });
     }
 
@@ -524,6 +562,8 @@ pub async fn create_thread_reply(
         thread_parent_id: message.thread_parent_id,
         reply_count: message.reply_count,
         last_reply_at: message.last_reply_at,
+        pinned_at: None, // Thread replies are not pinned by default
+        pinned_by: None,
     };
 
     // Get updated parent for metadata
@@ -709,6 +749,13 @@ pub async fn search_messages(
         // Get attachments for this message
         let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
 
+        // Get pinned_by display name if message is pinned
+        let pinned_by = if let Some(pinned_by_id) = msg.pinned_by_id {
+            state.user_service.get_by_id(pinned_by_id).await.ok().map(|u| u.display_name)
+        } else {
+            None
+        };
+
         let message_data = MessageData {
             id: msg.id,
             channel_id: msg.channel_id,
@@ -723,6 +770,8 @@ pub async fn search_messages(
             thread_parent_id: msg.thread_parent_id,
             reply_count: msg.reply_count,
             last_reply_at: msg.last_reply_at,
+            pinned_at: msg.pinned_at,
+            pinned_by,
         };
 
         results.push(MessageSearchResult {
@@ -733,4 +782,291 @@ pub async fn search_messages(
     }
 
     Ok(Json(results))
+}
+
+// Pin/Unpin endpoints
+
+/// Pin a message
+pub async fn pin_message(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MessageData>> {
+    let message = state
+        .message_service
+        .pin_message(id, auth.user_id)
+        .await?;
+
+    // Get author name
+    let author_name = state
+        .user_service
+        .get_by_id(message.author_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    // Get pinned_by display name
+    let pinned_by_name = state
+        .user_service
+        .get_by_id(auth.user_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    // Get reactions for the message
+    let reactions = state
+        .message_service
+        .get_reactions(message.id, auth.user_id)
+        .await
+        .map(|r| {
+            r.into_iter()
+                .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
+                    emoji,
+                    user_ids,
+                    reacted_by_me,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Get attachments for the message
+    let attachments = state
+        .attachment_service
+        .get_by_message_id(message.id)
+        .await
+        .map(|atts| {
+            atts.into_iter()
+                .map(|a| miscord_protocol::AttachmentData {
+                    id: a.id,
+                    filename: a.filename,
+                    content_type: a.content_type,
+                    size_bytes: a.size_bytes,
+                    url: a.url,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let message_data = MessageData {
+        id: message.id,
+        channel_id: message.channel_id,
+        author_id: message.author_id,
+        author_name,
+        content: message.content,
+        edited_at: message.edited_at,
+        reply_to_id: message.reply_to_id,
+        reactions,
+        attachments,
+        created_at: message.created_at,
+        thread_parent_id: message.thread_parent_id,
+        reply_count: message.reply_count,
+        last_reply_at: message.last_reply_at,
+        pinned_at: message.pinned_at,
+        pinned_by: Some(pinned_by_name.clone()),
+    };
+
+    // Broadcast pinned event
+    state.connections.broadcast_to_channel(
+        message.channel_id,
+        &miscord_protocol::ServerMessage::MessagePinned {
+            message_id: id,
+            channel_id: message.channel_id,
+            pinned_by_id: auth.user_id,
+            pinned_by_name,
+            pinned_at: message.pinned_at.unwrap(),
+        },
+    ).await;
+
+    Ok(Json(message_data))
+}
+
+/// Unpin a message
+pub async fn unpin_message(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MessageData>> {
+    // Get message before unpinning to get channel_id
+    let original_message = state.message_service.get_by_id(id).await?;
+    let channel_id = original_message.channel_id;
+
+    let message = state
+        .message_service
+        .unpin_message(id)
+        .await?;
+
+    // Get author name
+    let author_name = state
+        .user_service
+        .get_by_id(message.author_id)
+        .await
+        .map(|u| u.display_name)
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    // Get reactions for the message
+    let reactions = state
+        .message_service
+        .get_reactions(message.id, auth.user_id)
+        .await
+        .map(|r| {
+            r.into_iter()
+                .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
+                    emoji,
+                    user_ids,
+                    reacted_by_me,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Get attachments for the message
+    let attachments = state
+        .attachment_service
+        .get_by_message_id(message.id)
+        .await
+        .map(|atts| {
+            atts.into_iter()
+                .map(|a| miscord_protocol::AttachmentData {
+                    id: a.id,
+                    filename: a.filename,
+                    content_type: a.content_type,
+                    size_bytes: a.size_bytes,
+                    url: a.url,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let message_data = MessageData {
+        id: message.id,
+        channel_id: message.channel_id,
+        author_id: message.author_id,
+        author_name,
+        content: message.content,
+        edited_at: message.edited_at,
+        reply_to_id: message.reply_to_id,
+        reactions,
+        attachments,
+        created_at: message.created_at,
+        thread_parent_id: message.thread_parent_id,
+        reply_count: message.reply_count,
+        last_reply_at: message.last_reply_at,
+        pinned_at: None,
+        pinned_by: None,
+    };
+
+    // Broadcast unpinned event
+    state.connections.broadcast_to_channel(
+        channel_id,
+        &miscord_protocol::ServerMessage::MessageUnpinned {
+            message_id: id,
+            channel_id,
+        },
+    ).await;
+
+    Ok(Json(message_data))
+}
+
+/// Get all pinned messages in a channel
+pub async fn get_pinned_messages(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<Uuid>,
+    Query(query): Query<ListMessagesQuery>,
+) -> Result<Json<Vec<MessageData>>> {
+    let limit = query.limit.unwrap_or(50).min(100);
+    let messages = state
+        .message_service
+        .get_pinned_messages(channel_id, limit)
+        .await?;
+
+    // Get message IDs for batch reaction and attachment lookup
+    let message_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+
+    // Get reactions for all messages in one query
+    let reactions_map = state
+        .message_service
+        .get_reactions_for_messages(&message_ids, auth.user_id)
+        .await
+        .unwrap_or_default();
+
+    // Get attachments for all messages in one query
+    let attachments_list = state
+        .attachment_service
+        .get_by_message_ids(&message_ids)
+        .await
+        .unwrap_or_default();
+
+    // Group attachments by message_id
+    let mut attachments_map: std::collections::HashMap<Uuid, Vec<miscord_protocol::AttachmentData>> =
+        std::collections::HashMap::new();
+    for att in attachments_list {
+        if let Some(message_id) = att.message_id {
+            attachments_map
+                .entry(message_id)
+                .or_default()
+                .push(miscord_protocol::AttachmentData {
+                    id: att.id,
+                    filename: att.filename,
+                    content_type: att.content_type,
+                    size_bytes: att.size_bytes,
+                    url: att.url,
+                });
+        }
+    }
+
+    // Convert to MessageData with author names, reactions, and attachments
+    let mut result = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let author_name = state
+            .user_service
+            .get_by_id(msg.author_id)
+            .await
+            .map(|u| u.display_name)
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        // Get reactions for this message
+        let reactions = reactions_map
+            .get(&msg.id)
+            .map(|r| {
+                r.iter()
+                    .map(|(emoji, user_ids, reacted_by_me)| miscord_protocol::ReactionData {
+                        emoji: emoji.clone(),
+                        user_ids: user_ids.clone(),
+                        reacted_by_me: *reacted_by_me,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Get attachments for this message
+        let attachments = attachments_map.remove(&msg.id).unwrap_or_default();
+
+        // Get pinned_by display name if message is pinned
+        let pinned_by = if let Some(pinned_by_id) = msg.pinned_by_id {
+            state.user_service.get_by_id(pinned_by_id).await.ok().map(|u| u.display_name)
+        } else {
+            None
+        };
+
+        result.push(MessageData {
+            id: msg.id,
+            channel_id: msg.channel_id,
+            author_id: msg.author_id,
+            author_name,
+            content: msg.content,
+            edited_at: msg.edited_at,
+            reply_to_id: msg.reply_to_id,
+            reactions,
+            attachments,
+            created_at: msg.created_at,
+            thread_parent_id: msg.thread_parent_id,
+            reply_count: msg.reply_count,
+            last_reply_at: msg.last_reply_at,
+            pinned_at: msg.pinned_at,
+            pinned_by,
+        });
+    }
+
+    Ok(Json(result))
 }

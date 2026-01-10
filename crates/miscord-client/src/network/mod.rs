@@ -445,6 +445,44 @@ impl NetworkClient {
         .await
     }
 
+    // Pinned messages
+
+    /// Pin a message
+    pub async fn pin_message(&self, message_id: Uuid) -> Result<MessageData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::post_empty(
+            &format!("{}/api/messages/{}/pin", server_url, message_id),
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Unpin a message
+    pub async fn unpin_message(&self, message_id: Uuid) -> Result<MessageData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::delete_with_response(
+            &format!("{}/api/messages/{}/pin", server_url, message_id),
+            token.as_deref(),
+        )
+        .await
+    }
+
+    /// Get pinned messages in a channel
+    pub async fn get_pinned_messages(&self, channel_id: Uuid) -> Result<Vec<MessageData>> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        api::get(
+            &format!("{}/api/channels/{}/pinned-messages", server_url, channel_id),
+            token.as_deref(),
+        )
+        .await
+    }
+
     // Threads
 
     /// Get thread with parent message and replies

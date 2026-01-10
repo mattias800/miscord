@@ -691,6 +691,36 @@ impl AppState {
         state.thread_messages.remove(&parent_message_id);
     }
 
+    /// Mark a message as pinned (called when receiving MessagePinned WebSocket event)
+    pub async fn mark_message_pinned(
+        &self,
+        message_id: Uuid,
+        channel_id: Uuid,
+        pinned_at: DateTime<Utc>,
+        pinned_by: String,
+    ) {
+        let mut state = self.inner.write().await;
+        // Update the message in the channel's message list
+        if let Some(messages) = state.messages.get_mut(&channel_id) {
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.pinned_at = Some(pinned_at);
+                msg.pinned_by = Some(pinned_by);
+            }
+        }
+    }
+
+    /// Mark a message as unpinned (called when receiving MessageUnpinned WebSocket event)
+    pub async fn mark_message_unpinned(&self, message_id: Uuid, channel_id: Uuid) {
+        let mut state = self.inner.write().await;
+        // Update the message in the channel's message list
+        if let Some(messages) = state.messages.get_mut(&channel_id) {
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.pinned_at = None;
+                msg.pinned_by = None;
+            }
+        }
+    }
+
     /// Get cached OpenGraph data for a URL
     pub async fn get_opengraph(&self, url: &str) -> Option<OpenGraphData> {
         self.inner.read().await.opengraph_cache.get(url).cloned()

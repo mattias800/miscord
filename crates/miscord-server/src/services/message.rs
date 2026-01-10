@@ -19,7 +19,7 @@ impl MessageService {
             r#"
             INSERT INTO messages (id, channel_id, author_id, content, reply_to_id, thread_parent_id, reply_count, created_at)
             VALUES ($1, $2, $3, $4, $5, NULL, 0, NOW())
-            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
             "#,
             Uuid::new_v4(),
             channel_id,
@@ -42,7 +42,7 @@ impl MessageService {
         let message = sqlx::query_as!(
             Message,
             r#"
-            SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+            SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
             FROM messages WHERE id = $1
             "#,
             id
@@ -67,7 +67,7 @@ impl MessageService {
             sqlx::query_as!(
                 Message,
                 r#"
-                SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+                SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
                 FROM messages
                 WHERE channel_id = $1 AND created_at < $2 AND thread_parent_id IS NULL
                 ORDER BY created_at DESC
@@ -83,7 +83,7 @@ impl MessageService {
             sqlx::query_as!(
                 Message,
                 r#"
-                SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+                SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
                 FROM messages
                 WHERE channel_id = $1 AND thread_parent_id IS NULL
                 ORDER BY created_at DESC
@@ -106,7 +106,7 @@ impl MessageService {
             UPDATE messages
             SET content = $3, edited_at = NOW()
             WHERE id = $1 AND author_id = $2
-            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
             "#,
             id,
             author_id,
@@ -177,7 +177,7 @@ impl MessageService {
             r#"
             INSERT INTO messages (id, channel_id, author_id, content, reply_to_id, thread_parent_id, reply_count, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, 0, NOW())
-            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
             "#,
             Uuid::new_v4(),
             parent.channel_id,
@@ -213,7 +213,7 @@ impl MessageService {
         let messages = sqlx::query_as!(
             Message,
             r#"
-            SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, created_at
+            SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
             FROM messages
             WHERE thread_parent_id = $1
             ORDER BY created_at ASC
@@ -330,7 +330,7 @@ impl MessageService {
                 Message,
                 r#"
                 SELECT m.id, m.channel_id, m.author_id, m.content, m.edited_at, m.reply_to_id,
-                       m.thread_parent_id, m.reply_count, m.last_reply_at, m.created_at
+                       m.thread_parent_id, m.reply_count, m.last_reply_at, m.pinned_at, m.pinned_by_id, m.created_at
                 FROM messages m
                 JOIN channels c ON m.channel_id = c.id
                 JOIN community_members cm ON c.community_id = cm.community_id
@@ -356,7 +356,7 @@ impl MessageService {
                 Message,
                 r#"
                 SELECT m.id, m.channel_id, m.author_id, m.content, m.edited_at, m.reply_to_id,
-                       m.thread_parent_id, m.reply_count, m.last_reply_at, m.created_at
+                       m.thread_parent_id, m.reply_count, m.last_reply_at, m.pinned_at, m.pinned_by_id, m.created_at
                 FROM messages m
                 JOIN channels c ON m.channel_id = c.id
                 WHERE m.content ILIKE $1
@@ -434,5 +434,64 @@ impl MessageService {
         }
 
         Ok(result)
+    }
+
+    /// Pin a message
+    pub async fn pin_message(&self, message_id: Uuid, user_id: Uuid) -> Result<Message> {
+        let message = sqlx::query_as!(
+            Message,
+            r#"
+            UPDATE messages
+            SET pinned_at = NOW(), pinned_by_id = $2
+            WHERE id = $1
+            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
+            "#,
+            message_id,
+            user_id
+        )
+        .fetch_optional(&self.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Message not found".to_string()))?;
+
+        Ok(message)
+    }
+
+    /// Unpin a message
+    pub async fn unpin_message(&self, message_id: Uuid) -> Result<Message> {
+        let message = sqlx::query_as!(
+            Message,
+            r#"
+            UPDATE messages
+            SET pinned_at = NULL, pinned_by_id = NULL
+            WHERE id = $1
+            RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
+            "#,
+            message_id
+        )
+        .fetch_optional(&self.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Message not found".to_string()))?;
+
+        Ok(message)
+    }
+
+    /// Get all pinned messages in a channel
+    pub async fn get_pinned_messages(&self, channel_id: Uuid, limit: i64) -> Result<Vec<Message>> {
+        let messages = sqlx::query_as!(
+            Message,
+            r#"
+            SELECT id, channel_id, author_id, content, edited_at, reply_to_id, thread_parent_id, reply_count, last_reply_at, pinned_at, pinned_by_id, created_at
+            FROM messages
+            WHERE channel_id = $1 AND pinned_at IS NOT NULL
+            ORDER BY pinned_at DESC
+            LIMIT $2
+            "#,
+            channel_id,
+            limit
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(messages)
     }
 }

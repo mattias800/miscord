@@ -206,4 +206,19 @@ pub enum ServerMessage {
         reply_count: i32,
         last_reply_at: Option<DateTime<Utc>>,
     },
+
+    /// Message was pinned
+    MessagePinned {
+        message_id: Uuid,
+        channel_id: Uuid,
+        pinned_by_id: Uuid,
+        pinned_by_name: String,
+        pinned_at: DateTime<Utc>,
+    },
+
+    /// Message was unpinned
+    MessageUnpinned {
+        message_id: Uuid,
+        channel_id: Uuid,
+    },
 }

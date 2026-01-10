@@ -128,10 +128,12 @@ Polish and enhanced functionality:
 - [ ] Search results highlighting
 
 #### 3.5 Pinned Messages ✅
-- [ ] Pin important messages to a channel
+- [x] Pin important messages to a channel (via message action button)
 - [ ] "Pinned" button in channel header
 - [ ] Pinned messages panel/modal
-- [ ] Unpin option for admins/message author
+- [x] Unpin option for admins/message author (via message action button)
+- [x] Visual pin indicator (📌) on pinned messages
+- [x] Real-time sync via WebSocket (MessagePinned/MessageUnpinned events)
 
 ---
 
@@ -233,7 +235,7 @@ Another agent is currently working on server, community, and user account manage
   - [x] Message search (Cmd+F, searches all accessible channels/DMs, click to navigate, privacy-aware)
   - [x] File attachments (drag-and-drop, file picker, inline images, download cards with progress)
   - [x] Infinite scroll / Message history (scroll-to-load-more, "Jump to present" button)
-  - [ ] Pinned messages - Not yet implemented
+  - [x] Pinned messages (pin/unpin buttons, visual indicator, real-time WebSocket sync)
 
 ### Not Started
 - [ ] Phase 4: Nice to Have

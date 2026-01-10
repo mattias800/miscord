@@ -864,6 +864,22 @@ impl ChatView {
                                             state.open_thread(msg_id).await;
                                         });
                                     }
+                                    MessageAction::Pin(msg_id) => {
+                                        let network = network.clone();
+                                        runtime.spawn(async move {
+                                            if let Err(e) = network.pin_message(msg_id).await {
+                                                tracing::warn!("Failed to pin message: {}", e);
+                                            }
+                                        });
+                                    }
+                                    MessageAction::Unpin(msg_id) => {
+                                        let network = network.clone();
+                                        runtime.spawn(async move {
+                                            if let Err(e) = network.unpin_message(msg_id).await {
+                                                tracing::warn!("Failed to unpin message: {}", e);
+                                            }
+                                        });
+                                    }
                                 }
                             }
 
