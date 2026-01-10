@@ -9,8 +9,8 @@ use crate::state::AppState;
 use miscord_protocol::{AttachmentData, MessageData};
 
 use super::message::{
-    format_file_size, render_lightbox, render_message, MessageAction, MessageRenderOptions,
-    MessageRendererState, ReactionInfo,
+    format_file_size, format_relative_time, render_lightbox, render_message, MessageAction,
+    MessageRenderOptions, MessageRendererState, ReactionInfo,
 };
 
 /// How often to send typing indicators (in seconds)
@@ -63,6 +63,12 @@ pub struct ChatView {
     loading_started_at: Option<Instant>,
     /// Currently selected message for keyboard navigation
     selected_message_id: Option<Uuid>,
+    /// Whether the pinned messages panel is open
+    show_pinned_panel: bool,
+    /// Cached pinned messages for the current channel
+    pinned_messages: Vec<MessageData>,
+    /// Whether we're loading pinned messages
+    pinned_messages_loading: bool,
 }
 
 /// Get date separator text for a message
@@ -111,6 +117,9 @@ impl ChatView {
             last_message_count: 0,
             loading_started_at: None,
             selected_message_id: None,
+            show_pinned_panel: false,
+            pinned_messages: Vec::new(),
+            pinned_messages_loading: false,
         }
     }
 
@@ -164,6 +173,10 @@ impl ChatView {
             self.last_message_count = 0;
             self.loading_started_at = None;
             self.selected_message_id = None;
+            // Reset pinned messages panel for new channel
+            self.show_pinned_panel = false;
+            self.pinned_messages.clear();
+            self.pinned_messages_loading = false;
         }
 
         let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id) = runtime.block_on(async {
@@ -253,11 +266,48 @@ impl ChatView {
 
         let channel_id = current_channel.unwrap();
 
+        // Load pinned messages if panel is open and we haven't loaded yet
+        if self.show_pinned_panel && self.pinned_messages.is_empty() && !self.pinned_messages_loading {
+            self.pinned_messages_loading = true;
+            let ch_id = channel_id;
+            match runtime.block_on(network.get_pinned_messages(ch_id)) {
+                Ok(messages) => {
+                    self.pinned_messages = messages;
+                    self.pinned_messages_loading = false;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load pinned messages: {}", e);
+                    self.pinned_messages_loading = false;
+                }
+            }
+        }
+
         // Channel header at top
         egui::TopBottomPanel::top("chat_header")
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(format!("# {}", channel_name));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Pinned messages button
+                        let pinned_count = self.pinned_messages.len();
+                        let pin_btn_text = if self.show_pinned_panel {
+                            "📌 Hide Pinned".to_string()
+                        } else if pinned_count > 0 {
+                            format!("📌 Pinned ({})", pinned_count)
+                        } else {
+                            "📌 Pinned".to_string()
+                        };
+                        let pin_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(&pin_btn_text)
+                                    .size(13.0)
+                            )
+                            .rounding(egui::Rounding::same(4.0))
+                        );
+                        if pin_btn.clicked() {
+                            self.show_pinned_panel = !self.show_pinned_panel;
+                        }
+                    });
                 });
             });
 
@@ -661,6 +711,96 @@ impl ChatView {
                 }
                 self.prev_input_len = current_len;
             });
+
+        // Pinned messages panel (right side)
+        if self.show_pinned_panel {
+            egui::SidePanel::right("pinned_messages_panel")
+                .default_width(320.0)
+                .min_width(280.0)
+                .max_width(400.0)
+                .resizable(true)
+                .show_inside(ui, |ui| {
+                    ui.vertical(|ui| {
+                        // Panel header
+                        ui.horizontal(|ui| {
+                            ui.heading("📌 Pinned Messages");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("✕").clicked() {
+                                    self.show_pinned_panel = false;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        // Pinned messages list
+                        if self.pinned_messages_loading {
+                            ui.centered_and_justified(|ui| {
+                                ui.spinner();
+                            });
+                        } else if self.pinned_messages.is_empty() {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new("No pinned messages")
+                                        .color(egui::Color32::GRAY)
+                                        .italics()
+                                );
+                            });
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    for pinned_msg in &self.pinned_messages {
+                                        ui.group(|ui| {
+                                            // Author and time
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(&pinned_msg.author_name)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(200, 200, 255))
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format_relative_time(pinned_msg.created_at))
+                                                        .small()
+                                                        .color(egui::Color32::GRAY)
+                                                );
+                                            });
+
+                                            // Message content (truncated if long)
+                                            let content = if pinned_msg.content.len() > 200 {
+                                                format!("{}...", &pinned_msg.content[..200])
+                                            } else {
+                                                pinned_msg.content.clone()
+                                            };
+                                            ui.label(&content);
+
+                                            // Pinned by info
+                                            if let Some(ref pinned_by) = pinned_msg.pinned_by {
+                                                ui.label(
+                                                    egui::RichText::new(format!("Pinned by {}", pinned_by))
+                                                        .small()
+                                                        .italics()
+                                                        .color(egui::Color32::from_rgb(140, 140, 140))
+                                                );
+                                            }
+
+                                            // Jump to message button
+                                            if ui.small_button("Jump to message").clicked() {
+                                                // Set the scroll target to this message
+                                                let state = state.clone();
+                                                let msg_id = pinned_msg.id;
+                                                runtime.spawn(async move {
+                                                    let mut s = state.write().await;
+                                                    s.scroll_to_message_id = Some(msg_id);
+                                                });
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                    }
+                                });
+                        }
+                    });
+                });
+        }
 
         // Messages area fills remaining space
         egui::CentralPanel::default()

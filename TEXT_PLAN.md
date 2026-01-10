@@ -129,8 +129,8 @@ Polish and enhanced functionality:
 
 #### 3.5 Pinned Messages ✅
 - [x] Pin important messages to a channel (via message action button)
-- [ ] "Pinned" button in channel header
-- [ ] Pinned messages panel/modal
+- [x] "Pinned" button in channel header
+- [x] Pinned messages panel/modal
 - [x] Unpin option for admins/message author (via message action button)
 - [x] Visual pin indicator (📌) on pinned messages
 - [x] Real-time sync via WebSocket (MessagePinned/MessageUnpinned events)
