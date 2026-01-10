@@ -121,11 +121,11 @@ Polish and enhanced functionality:
 - [ ] Loading indicator while fetching
 - [ ] Smart auto-scroll (scroll to new messages only when at bottom, preserve position when reading older messages)
 
-#### 3.4 Message Search
-- [ ] Search within current channel or DM
-- [ ] Full-text search across all messages
+#### 3.4 Message Search ✅
+- [x] Search within current channel or DM
+- [x] Full-text search across all messages (Cmd+F / Ctrl+F)
 - [ ] Filter by user, date range
-- [ ] Jump to message in context
+- [x] Jump to message in context
 - [ ] Search results highlighting
 
 #### 3.5 Pinned Messages ✅
@@ -175,7 +175,8 @@ Lower priority enhancements:
 - [ ] `E` to edit selected message
 - [ ] `R` to reply to selected message
 - [ ] `Delete` to delete selected message
-- [ ] `Ctrl+K` / `Cmd+K` for quick channel/DM switcher
+- [x] `Ctrl+T` / `Cmd+T` for quick channel/DM switcher
+- [x] `Ctrl+F` / `Cmd+F` for message search
 - [ ] `Escape` to deselect/cancel
 
 ---
@@ -230,10 +231,10 @@ Another agent is currently working on server, community, and user account manage
 ### In Progress
 - [ ] Phase 3: Medium Impact Features
   - [x] Message reactions (emoji picker, counts, real-time sync via WebSocket, user ID tracking)
+  - [x] Message search (Cmd+F, searches all accessible channels/DMs, click to navigate, privacy-aware)
   - [ ] File attachments - Not yet implemented
   - [ ] Pinned messages - Not yet implemented
   - [ ] Infinite scroll / Message history - Not yet implemented
-  - [ ] Message search - Not yet implemented
 
 ### Not Started
 - [ ] Phase 4: Nice to Have
