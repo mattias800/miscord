@@ -133,6 +133,7 @@ impl ChannelList {
                     for channel in text_channels {
                         let is_selected = current_channel == Some(channel.id);
                         let has_unread = channel.unread_count > 0;
+                        let has_draft = state.has_draft_sync(channel.id);
 
                         // Bright text for unread channels, muted for read, normal for selected
                         let text_color = if is_selected {
@@ -160,10 +161,26 @@ impl ChannelList {
                             )
                         });
 
+                        let badge_rect = response.response.rect;
+                        let painter = ui.painter();
+
+                        // Show draft indicator (pencil icon)
+                        if has_draft && !is_selected {
+                            let draft_pos = egui::pos2(
+                                badge_rect.right() - if has_unread { 32.0 } else { 16.0 },
+                                badge_rect.center().y,
+                            );
+                            painter.text(
+                                draft_pos,
+                                egui::Align2::CENTER_CENTER,
+                                "✏",
+                                egui::FontId::proportional(12.0),
+                                theme::TEXT_MUTED,
+                            );
+                        }
+
                         // Show unread badge inline
                         if has_unread && !is_selected {
-                            let badge_rect = response.response.rect;
-                            let painter = ui.painter();
                             let badge_center = egui::pos2(
                                 badge_rect.right() - 16.0,
                                 badge_rect.center().y,

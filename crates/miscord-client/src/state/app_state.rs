@@ -129,6 +129,9 @@ pub struct AppStateInner {
 
     // Scroll to a specific message (set when navigating from search)
     pub scroll_to_message_id: Option<Uuid>,
+
+    // Draft messages (channel_id -> draft text)
+    pub drafts: HashMap<Uuid, String>,
 }
 
 impl Default for AppStateInner {
@@ -182,6 +185,7 @@ impl Default for AppStateInner {
             image_failed: HashSet::new(),
             recent_channel_ids: Vec::new(),
             scroll_to_message_id: None,
+            drafts: HashMap::new(),
         }
     }
 }
@@ -788,6 +792,39 @@ impl AppState {
         let mut state = self.inner.write().await;
         state.image_pending.remove(url);
         state.image_failed.insert(url.to_string());
+    }
+
+    // Draft message methods
+
+    /// Save a draft message for a channel
+    pub async fn save_draft(&self, channel_id: Uuid, content: String) {
+        let mut state = self.inner.write().await;
+        if content.trim().is_empty() {
+            state.drafts.remove(&channel_id);
+        } else {
+            state.drafts.insert(channel_id, content);
+        }
+    }
+
+    /// Get the draft message for a channel (if any)
+    pub async fn get_draft(&self, channel_id: Uuid) -> Option<String> {
+        self.inner.read().await.drafts.get(&channel_id).cloned()
+    }
+
+    /// Clear the draft for a channel (called after sending)
+    pub async fn clear_draft(&self, channel_id: Uuid) {
+        let mut state = self.inner.write().await;
+        state.drafts.remove(&channel_id);
+    }
+
+    /// Check if a channel has a draft (for showing indicator)
+    pub async fn has_draft(&self, channel_id: Uuid) -> bool {
+        self.inner.read().await.drafts.contains_key(&channel_id)
+    }
+
+    /// Synchronous version of has_draft for UI rendering
+    pub fn has_draft_sync(&self, channel_id: Uuid) -> bool {
+        self.inner.try_read().ok().map(|s| s.drafts.contains_key(&channel_id)).unwrap_or(false)
     }
 }
 

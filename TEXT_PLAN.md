@@ -158,11 +158,11 @@ Lower priority enhancements:
 - [ ] Video call support
 - [ ] Call history
 
-#### 4.4 Draft Messages
-- [ ] Auto-save unsent message when switching channels
-- [ ] Restore draft when returning to channel
-- [ ] Visual indicator that draft exists
-- [ ] Local storage (not server-side)
+#### 4.4 Draft Messages ✅
+- [x] Auto-save unsent message when switching channels
+- [x] Restore draft when returning to channel
+- [x] Visual indicator that draft exists (pencil icon in channel list)
+- [x] Local storage (not server-side)
 
 #### 4.5 Compact Mode
 - [ ] Toggle for denser message display
@@ -240,7 +240,7 @@ Another agent is currently working on server, community, and user account manage
   - [ ] GIF support (Tenor API integration, picker UI, inline display)
   - [ ] Delivery status indicators
   - [ ] Voice/Video calls in DMs
-  - [ ] Draft messages
+  - [x] Draft messages (auto-save, restore, pencil indicator)
   - [ ] Compact mode
   - [ ] Keyboard navigation
 

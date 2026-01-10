@@ -47,6 +47,8 @@ pub struct ChatView {
     mention_dismissed: bool,
     /// Pending file attachments to upload with the next message
     pending_attachments: Vec<PendingAttachment>,
+    /// Currently viewed channel (for draft save/restore on channel switch)
+    current_channel_id: Option<Uuid>,
 }
 
 /// Get date separator text for a message
@@ -87,6 +89,7 @@ impl ChatView {
             pending_cursor_pos: None,
             mention_dismissed: false,
             pending_attachments: Vec::new(),
+            current_channel_id: None,
         }
     }
 
@@ -99,6 +102,40 @@ impl ChatView {
     ) {
         // Handle dropped files (drag-and-drop)
         self.handle_dropped_files(ui);
+
+        // Handle draft save/restore on channel switch
+        let new_channel_id = runtime.block_on(async {
+            state.read().await.current_channel_id
+        });
+
+        if new_channel_id != self.current_channel_id {
+            // Channel changed - save draft for old channel, load draft for new
+            if let Some(old_channel_id) = self.current_channel_id {
+                // Save current input as draft for the old channel
+                let draft = self.message_input.clone();
+                let state_clone = state.clone();
+                runtime.spawn(async move {
+                    state_clone.save_draft(old_channel_id, draft).await;
+                });
+            }
+
+            if let Some(channel_id) = new_channel_id {
+                // Load draft for new channel
+                if let Some(draft) = runtime.block_on(state.get_draft(channel_id)) {
+                    self.message_input = draft;
+                } else {
+                    self.message_input.clear();
+                }
+            } else {
+                self.message_input.clear();
+            }
+
+            // Clear reply/edit state when switching channels
+            self.replying_to = None;
+            self.editing_message = None;
+            self.mention_active = false;
+            self.current_channel_id = new_channel_id;
+        }
 
         let (current_channel, messages, channel_name, typing_usernames, current_user_id, message_reactions, members, scroll_to_message_id) = runtime.block_on(async {
             let s = state.read().await;
@@ -770,7 +807,7 @@ impl ChatView {
     fn send_message(
         &mut self,
         channel_id: uuid::Uuid,
-        _state: &AppState,
+        state: &AppState,
         network: &NetworkClient,
         runtime: &tokio::runtime::Runtime,
     ) {
@@ -781,6 +818,12 @@ impl ChatView {
 
         let content = self.message_input.clone();
         self.message_input.clear();
+
+        // Clear the draft since we're sending
+        let state_for_draft = state.clone();
+        runtime.spawn(async move {
+            state_for_draft.clear_draft(channel_id).await;
+        });
 
         // Take pending attachments
         let attachments: Vec<(String, String, Vec<u8>)> = self.pending_attachments
