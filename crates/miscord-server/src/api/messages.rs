@@ -569,6 +569,9 @@ pub struct MessageSearchResult {
 }
 
 /// Search messages by content
+/// Only returns messages from channels the user has access to:
+/// - Community channels: user must be a member
+/// - DM channels: user must be a participant
 pub async fn search_messages(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -581,9 +584,10 @@ pub async fn search_messages(
         return Ok(Json(vec![]));
     }
 
+    // Search with user_id for access control
     let messages = state
         .message_service
-        .search_messages(&query.q, query.community_id, limit)
+        .search_messages(&query.q, auth.user_id, query.community_id, limit)
         .await?;
 
     if messages.is_empty() {
@@ -636,23 +640,56 @@ pub async fn search_messages(
             .map(|u| u.display_name)
             .unwrap_or_else(|_| "Unknown".to_string());
 
-        // Get channel info (use channel service)
+        // Get channel info
         let channel_info = state.channel_service.get_by_id(msg.channel_id).await.ok();
-        let channel_name = channel_info.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Unknown".to_string());
-        let community_name = if let Some(ref ch) = channel_info {
-            if let Some(comm_id) = ch.community_id {
-                // Query community name directly
-                sqlx::query_scalar!("SELECT name FROM communities WHERE id = $1", comm_id)
+
+        // Determine channel name and community name
+        let (channel_name, community_name) = if let Some(ref ch) = channel_info {
+            if ch.channel_type == crate::models::ChannelType::DirectMessage {
+                // For DMs, get the other user's name as channel name
+                let dm_info = sqlx::query!(
+                    r#"
+                    SELECT user1_id, user2_id FROM direct_message_channels
+                    WHERE channel_id = $1
+                    "#,
+                    msg.channel_id
+                )
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+
+                let other_user_name = if let Some(dm) = dm_info {
+                    let other_id = if dm.user1_id == auth.user_id {
+                        dm.user2_id
+                    } else {
+                        dm.user1_id
+                    };
+                    state
+                        .user_service
+                        .get_by_id(other_id)
+                        .await
+                        .map(|u| u.display_name)
+                        .unwrap_or_else(|_| "Unknown".to_string())
+                } else {
+                    "Unknown".to_string()
+                };
+
+                (other_user_name, "Direct Message".to_string())
+            } else if let Some(comm_id) = ch.community_id {
+                // Community channel
+                let comm_name = sqlx::query_scalar!("SELECT name FROM communities WHERE id = $1", comm_id)
                     .fetch_optional(&state.db)
                     .await
                     .ok()
                     .flatten()
-                    .unwrap_or_else(|| "Unknown".to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                (ch.name.clone(), comm_name)
             } else {
-                "Unknown".to_string()
+                (ch.name.clone(), "Unknown".to_string())
             }
         } else {
-            "Unknown".to_string()
+            ("Unknown".to_string(), "Unknown".to_string())
         };
 
         // Get reactions for this message

@@ -228,6 +228,46 @@ impl MiscordApp {
                     network.subscribe_channel(id).await;
                 });
             }
+            SwitcherItem::User { id: user_id, .. } => {
+                let state = self.state.clone();
+                let network = self.network.clone();
+
+                self.runtime.spawn(async move {
+                    // Create or get the DM channel with this user
+                    match network.create_or_get_dm(user_id).await {
+                        Ok(dm_channel) => {
+                            // Clear community selection for DMs
+                            {
+                                let mut s = state.write().await;
+                                s.current_community_id = None;
+                            }
+
+                            // Add channel to state
+                            {
+                                let mut s = state.write().await;
+                                s.channels.insert(dm_channel.id, dm_channel.clone());
+                            }
+
+                            // Select the DM channel
+                            state.select_channel(dm_channel.id).await;
+                            state.mark_channel_read(dm_channel.id).await;
+                            let _ = network.mark_channel_read(dm_channel.id).await;
+
+                            // Load messages
+                            if let Ok(messages) = network.get_messages(dm_channel.id, None).await {
+                                let mut s = state.write().await;
+                                s.messages.insert(dm_channel.id, messages);
+                            }
+
+                            // Subscribe to channel
+                            network.subscribe_channel(dm_channel.id).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create/get DM channel: {}", e);
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -238,7 +278,7 @@ impl MiscordApp {
         let message_id = selection.message_id;
 
         self.runtime.spawn(async move {
-            // Switch community if needed
+            // Switch community if needed, or clear for DMs
             if let Some(community_id) = selection.community_id {
                 let needs_switch = {
                     let s = state.read().await;
@@ -251,6 +291,10 @@ impl MiscordApp {
                         state.set_channels(channels).await;
                     }
                 }
+            } else {
+                // DM message - clear community selection
+                let mut s = state.write().await;
+                s.current_community_id = None;
             }
 
             // Select the channel

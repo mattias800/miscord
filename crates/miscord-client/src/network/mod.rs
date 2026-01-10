@@ -300,6 +300,18 @@ impl NetworkClient {
         api::get(&url, token.as_deref()).await
     }
 
+    /// Create or get a DM channel with a user
+    pub async fn create_or_get_dm(&self, user_id: Uuid) -> Result<ChannelData> {
+        let server_url = self.get_server_url().await;
+        let token = self.get_token().await;
+
+        // POST to /api/dms/{user_id} creates or gets existing DM
+        api::post_empty(
+            &format!("{}/api/dms/{}", server_url, user_id),
+            token.as_deref(),
+        ).await
+    }
+
     pub async fn send_message(&self, channel_id: Uuid, content: &str) -> Result<MessageData> {
         self.send_message_with_reply(channel_id, content, None).await
     }

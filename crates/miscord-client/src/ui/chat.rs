@@ -688,14 +688,15 @@ impl ChatView {
                             // Check if this is the message we want to scroll to
                             let is_scroll_target = scroll_to_message_id == Some(message.id);
 
-                            // Add highlight if this is the scroll target
+                            // Track the position before rendering for scroll target
+                            let before_cursor = ui.cursor();
+
+                            // Add highlight background if this is the scroll target
                             if is_scroll_target {
-                                // Draw a highlight background behind the message
-                                let cursor_rect = ui.cursor();
                                 let highlight_color = egui::Color32::from_rgba_unmultiplied(88, 101, 242, 40);
                                 ui.painter().rect_filled(
                                     egui::Rect::from_min_size(
-                                        cursor_rect.min,
+                                        before_cursor.min,
                                         egui::vec2(ui.available_width(), 80.0),
                                     ),
                                     egui::Rounding::same(4.0),
@@ -737,11 +738,19 @@ impl ChatView {
                             // Scroll to this message if it's the target
                             if is_scroll_target && !found_scroll_target {
                                 found_scroll_target = true;
-                                ui.scroll_to_cursor(Some(egui::Align::Center));
+                                // Get the rect after rendering and scroll to it
+                                let after_cursor = ui.cursor();
+                                let message_rect = egui::Rect::from_min_max(
+                                    before_cursor.min,
+                                    egui::pos2(before_cursor.min.x + ui.available_width(), after_cursor.min.y),
+                                );
+                                ui.scroll_to_rect(message_rect, Some(egui::Align::Center));
 
-                                // Clear the scroll target
+                                // Clear the scroll target after a short delay to allow re-render
                                 let state = state.clone();
                                 runtime.spawn(async move {
+                                    // Small delay to ensure the scroll completes
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                                     let mut s = state.write().await;
                                     s.scroll_to_message_id = None;
                                 });

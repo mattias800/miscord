@@ -311,18 +311,47 @@ impl MessageService {
         Ok(result)
     }
 
-    /// Search messages by content across all channels the user has access to
+    /// Search messages by content across channels the user has access to
+    /// - For community channels: only searches in communities user is a member of
+    /// - For DMs: only searches in DMs where user is a participant
     /// Returns messages matching the query, newest first
     pub async fn search_messages(
         &self,
         query: &str,
+        user_id: Uuid,
         community_id: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<Message>> {
         let search_pattern = format!("%{}%", query);
 
         let messages = if let Some(comm_id) = community_id {
-            // Search within a specific community
+            // Search within a specific community (verify membership)
+            sqlx::query_as!(
+                Message,
+                r#"
+                SELECT m.id, m.channel_id, m.author_id, m.content, m.edited_at, m.reply_to_id,
+                       m.thread_parent_id, m.reply_count, m.last_reply_at, m.created_at
+                FROM messages m
+                JOIN channels c ON m.channel_id = c.id
+                JOIN community_members cm ON c.community_id = cm.community_id
+                WHERE m.content ILIKE $1
+                  AND c.community_id = $2
+                  AND cm.user_id = $3
+                  AND m.thread_parent_id IS NULL
+                ORDER BY m.created_at DESC
+                LIMIT $4
+                "#,
+                search_pattern,
+                comm_id,
+                user_id,
+                limit
+            )
+            .fetch_all(&self.db)
+            .await?
+        } else {
+            // Search across all accessible channels:
+            // 1. Community channels where user is a member
+            // 2. DM channels where user is a participant
             sqlx::query_as!(
                 Message,
                 r#"
@@ -331,30 +360,25 @@ impl MessageService {
                 FROM messages m
                 JOIN channels c ON m.channel_id = c.id
                 WHERE m.content ILIKE $1
-                  AND c.community_id = $2
                   AND m.thread_parent_id IS NULL
+                  AND (
+                    -- Community channels: user must be a member
+                    (c.community_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM community_members cm
+                      WHERE cm.community_id = c.community_id AND cm.user_id = $2
+                    ))
+                    OR
+                    -- DM channels: user must be a participant
+                    (c.channel_type = 'direct_message' AND EXISTS (
+                      SELECT 1 FROM direct_message_channels dm
+                      WHERE dm.channel_id = c.id AND (dm.user1_id = $2 OR dm.user2_id = $2)
+                    ))
+                  )
                 ORDER BY m.created_at DESC
                 LIMIT $3
                 "#,
                 search_pattern,
-                comm_id,
-                limit
-            )
-            .fetch_all(&self.db)
-            .await?
-        } else {
-            // Search across all channels
-            sqlx::query_as!(
-                Message,
-                r#"
-                SELECT id, channel_id, author_id, content, edited_at, reply_to_id,
-                       thread_parent_id, reply_count, last_reply_at, created_at
-                FROM messages
-                WHERE content ILIKE $1 AND thread_parent_id IS NULL
-                ORDER BY created_at DESC
-                LIMIT $2
-                "#,
-                search_pattern,
+                user_id,
                 limit
             )
             .fetch_all(&self.db)

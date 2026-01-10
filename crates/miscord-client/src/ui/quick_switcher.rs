@@ -1,4 +1,4 @@
-//! Quick Switcher - Cmd+T/Ctrl+T to quickly navigate to channels
+//! Quick Switcher - Cmd+T/Ctrl+T to quickly navigate to channels and users
 
 use eframe::egui;
 use uuid::Uuid;
@@ -14,6 +14,12 @@ pub enum SwitcherItem {
         name: String,
         community_name: String,
         community_id: Uuid,
+    },
+    /// User selection - will navigate to DM with this user
+    User {
+        id: Uuid,
+        username: String,
+        display_name: String,
     },
 }
 
@@ -153,7 +159,7 @@ impl QuickSwitcher {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("Search channels...")
+                                egui::RichText::new("Search channels and users...")
                                     .size(14.0)
                                     .color(theme::TEXT_MUTED)
                             );
@@ -196,7 +202,7 @@ impl QuickSwitcher {
                                     egui::RichText::new(if self.search_query.is_empty() {
                                         "No recent channels"
                                     } else {
-                                        "No channels found"
+                                        "No results found"
                                     })
                                     .size(14.0)
                                     .color(theme::TEXT_MUTED)
@@ -211,7 +217,7 @@ impl QuickSwitcher {
                                     egui::RichText::new(if self.search_query.is_empty() {
                                         "Recent"
                                     } else {
-                                        "Channels"
+                                        "Results"
                                     })
                                     .size(12.0)
                                     .color(theme::TEXT_MUTED)
@@ -222,24 +228,32 @@ impl QuickSwitcher {
                             for (idx, item) in self.results.iter().enumerate() {
                                 let is_selected = idx == self.selected_index;
 
-                                match item {
+                                let response = match item {
                                     SwitcherItem::Channel { name, community_name, .. } => {
-                                        let response = self.render_channel_item(
+                                        self.render_channel_item(
                                             ui,
                                             name,
                                             community_name,
                                             is_selected,
-                                        );
-
-                                        if response.clicked() {
-                                            selected_item = Some(item.clone());
-                                            should_close = true;
-                                        }
-
-                                        if response.hovered() {
-                                            self.selected_index = idx;
-                                        }
+                                        )
                                     }
+                                    SwitcherItem::User { display_name, username, .. } => {
+                                        self.render_user_item(
+                                            ui,
+                                            display_name,
+                                            username,
+                                            is_selected,
+                                        )
+                                    }
+                                };
+
+                                if response.clicked() {
+                                    selected_item = Some(item.clone());
+                                    should_close = true;
+                                }
+
+                                if response.hovered() {
+                                    self.selected_index = idx;
                                 }
                             }
                         }
@@ -344,6 +358,76 @@ impl QuickSwitcher {
         response
     }
 
+    fn render_user_item(
+        &self,
+        ui: &mut egui::Ui,
+        display_name: &str,
+        username: &str,
+        is_selected: bool,
+    ) -> egui::Response {
+        let bg_color = if is_selected {
+            theme::BLURPLE_DARK
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 40.0),
+            egui::Sense::click(),
+        );
+
+        if ui.is_rect_visible(rect) {
+            // Background
+            let bg = if response.hovered() && !is_selected {
+                theme::BG_ACCENT
+            } else {
+                bg_color
+            };
+
+            ui.painter().rect_filled(rect, egui::Rounding::same(4.0), bg);
+
+            // Content
+            let content_rect = rect.shrink2(egui::vec2(16.0, 0.0));
+
+            // User icon (@)
+            let icon_rect = egui::Rect::from_min_size(
+                content_rect.left_top() + egui::vec2(0.0, 10.0),
+                egui::vec2(20.0, 20.0),
+            );
+            ui.painter().text(
+                icon_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "@",
+                egui::FontId::proportional(16.0),
+                theme::TEXT_LINK,
+            );
+
+            // Display name
+            let name_pos = content_rect.left_top() + egui::vec2(28.0, 12.0);
+            ui.painter().text(
+                name_pos,
+                egui::Align2::LEFT_CENTER,
+                display_name,
+                egui::FontId::proportional(15.0),
+                if is_selected { theme::TEXT_BRIGHT } else { theme::TEXT_NORMAL },
+            );
+
+            // Username (right side) if different from display name
+            if username != display_name {
+                let username_pos = content_rect.right_top() + egui::vec2(-8.0, 12.0);
+                ui.painter().text(
+                    username_pos,
+                    egui::Align2::RIGHT_CENTER,
+                    username,
+                    egui::FontId::proportional(13.0),
+                    theme::TEXT_MUTED,
+                );
+            }
+        }
+
+        response
+    }
+
     fn render_hint(&self, ui: &mut egui::Ui, key: &str, action: &str) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -374,8 +458,11 @@ impl QuickSwitcher {
         runtime.block_on(async {
             let s = state.read().await;
 
+            // Get current user ID to exclude from user search
+            let current_user_id = s.current_user.as_ref().map(|u| u.id);
+
             // Get all channels with their community info
-            let mut all_channels: Vec<SwitcherItem> = s.channels.values()
+            let all_channels: Vec<SwitcherItem> = s.channels.values()
                 .filter(|c| c.channel_type == miscord_protocol::ChannelType::Text)
                 .filter_map(|channel| {
                     let community_id = channel.community_id?;
@@ -389,8 +476,25 @@ impl QuickSwitcher {
                 })
                 .collect();
 
+            // Get all users from all community members (excluding self)
+            let mut seen_users = std::collections::HashSet::new();
+            let all_users: Vec<SwitcherItem> = s.members.values()
+                .flatten()
+                .filter(|user| {
+                    // Skip current user and duplicates
+                    let dominated = current_user_id == Some(user.id) || seen_users.contains(&user.id);
+                    seen_users.insert(user.id);
+                    !dominated
+                })
+                .map(|user| SwitcherItem::User {
+                    id: user.id,
+                    username: user.username.clone(),
+                    display_name: user.display_name.clone(),
+                })
+                .collect();
+
             if query.is_empty() {
-                // Show recent channels
+                // Show recent channels only (no recent users for now)
                 let recent_ids = &s.recent_channel_ids;
                 self.results = recent_ids.iter()
                     .filter_map(|id| {
@@ -400,45 +504,65 @@ impl QuickSwitcher {
                     })
                     .collect();
             } else {
-                // Fuzzy search - score and sort
-                let mut scored: Vec<(SwitcherItem, i32)> = all_channels.into_iter()
-                    .filter_map(|item| {
-                        let score = match &item {
-                            SwitcherItem::Channel { name, community_name, .. } => {
-                                let name_lower = name.to_lowercase();
-                                let community_lower = community_name.to_lowercase();
+                // Fuzzy search channels and users - score and sort
+                let mut scored: Vec<(SwitcherItem, i32)> = Vec::new();
 
-                                if name_lower == query {
-                                    100 // Exact match
-                                } else if name_lower.starts_with(&query) {
-                                    80 // Starts with
-                                } else if name_lower.contains(&query) {
-                                    60 // Contains in name
-                                } else if community_lower.contains(&query) {
-                                    40 // Contains in community
-                                } else {
-                                    return None; // No match
-                                }
-                            }
+                // Score channels
+                for item in all_channels {
+                    if let SwitcherItem::Channel { ref name, ref community_name, .. } = item {
+                        let name_lower = name.to_lowercase();
+                        let community_lower = community_name.to_lowercase();
+
+                        let score = if name_lower == query {
+                            100 // Exact match
+                        } else if name_lower.starts_with(&query) {
+                            80 // Starts with
+                        } else if name_lower.contains(&query) {
+                            60 // Contains in name
+                        } else if community_lower.contains(&query) {
+                            40 // Contains in community
+                        } else {
+                            continue; // No match
                         };
-                        Some((item, score))
-                    })
-                    .collect();
+                        scored.push((item, score));
+                    }
+                }
+
+                // Score users
+                for item in all_users {
+                    if let SwitcherItem::User { ref username, ref display_name, .. } = item {
+                        let username_lower = username.to_lowercase();
+                        let display_lower = display_name.to_lowercase();
+
+                        let score = if username_lower == query || display_lower == query {
+                            95 // Exact match (slightly lower than channel exact)
+                        } else if username_lower.starts_with(&query) || display_lower.starts_with(&query) {
+                            75 // Starts with
+                        } else if username_lower.contains(&query) || display_lower.contains(&query) {
+                            55 // Contains
+                        } else {
+                            continue; // No match
+                        };
+                        scored.push((item, score));
+                    }
+                }
 
                 // Sort by score descending, then by name
                 scored.sort_by(|a, b| {
                     b.1.cmp(&a.1).then_with(|| {
                         let name_a = match &a.0 {
                             SwitcherItem::Channel { name, .. } => name,
+                            SwitcherItem::User { display_name, .. } => display_name,
                         };
                         let name_b = match &b.0 {
                             SwitcherItem::Channel { name, .. } => name,
+                            SwitcherItem::User { display_name, .. } => display_name,
                         };
                         name_a.cmp(name_b)
                     })
                 });
 
-                self.results = scored.into_iter().map(|(item, _)| item).collect();
+                self.results = scored.into_iter().map(|(item, _)| item).take(20).collect();
             }
 
             // Clamp selected index
